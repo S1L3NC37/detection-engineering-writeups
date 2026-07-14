@@ -37,7 +37,6 @@ Detection writeups start next, beginning with execution on Windows: `cmd.exe` sp
 
 Every VM runs on one physical host with 32 GB of RAM. Their combined minimum allocation is closer to 44 GB, so they cannot all run at once. Deciding which of them coexist turned out to be the most instructive constraint in the whole build.
 
-LinuxA is the attacker box, and it's the only machine in the lab deliberately left uninstrumented. Nothing on it ships to Splunk. In a real incident you don't get telemetry from the attacker's machine, so everything has to be caught with what the victims produce. That's the constraint the rest of the environment is built around.
 
 ### Telemetry pipeline
 
