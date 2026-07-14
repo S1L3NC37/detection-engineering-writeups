@@ -26,9 +26,9 @@ Here's the fleet:
 | CERTER | Member server, config deployment host | 4 GB | `.136` |
 | Win11V | Domain workstation, detonation target | 4 GB | `.137` |
 | Win11A | Domain workstation | 4 GB | `.138` |
-| LinuxA | Attacker box | 4 GB | `.139` |
+| LinuxA | Attacker box, deliberately uninstrumented | 4 GB | `.139` |
 | Malcolm | Network traffic analysis | 16 GB | `.140` |
-| LinuxV | Kubernetes host | 8 GB | `.141` |
+| LinuxV | Kubernetes host, auditd and Laurel telemetry | 8 GB | `.141` |
 
 ## Identity: the domain
 
@@ -55,6 +55,20 @@ Rather than hand-installing on each box, I push the config from one console usin
 ![Sysmon process creation event](images/sysmon-process-creation.png)
 
 *A single Sysmon process creation event on one of my workstations. Every process gets recorded with its full command line, the hashes of the binary, the user it ran as, and the parent that spawned it. That last part is what makes detection possible: a process on its own is rarely suspicious, but a process with the wrong parent usually is.*
+
+## The Linux side: auditd and Laurel
+
+The Windows machines have Sysmon. The Linux machines need their own answer to the same question, and on Linux that starts with auditd, the kernel's audit subsystem. It sits below the process layer and records syscalls: the actual system calls a program makes when it opens a file, spawns a child, or reaches out over the network. That's a lower vantage point than Sysmon has, and it's the right one, because a lot of Linux attacker behavior is just ordinary binaries making ordinary syscalls in an unusual pattern.
+
+I run a community ruleset that tells auditd what to watch, so I'm not recording every syscall on the box, which would be unusable.
+
+The problem is that raw auditd output is close to unreadable. A single event gets split across multiple lines, keys are cryptic, and arguments come out hex-encoded. You can grep it. You cannot reasonably build detections on it.
+
+Laurel fixes that. It sits between auditd and the log file and transforms those fragments into a single structured JSON record per event, with the pieces resolved into something a human and a SIEM can both work with. A Universal Forwarder then watches that file and ships it into the `linux` index, the same push path the Windows machines use.
+
+What this buys me is syscall-level visibility. Something reading `/etc/shadow` shows up. A bash process with its input and output redirected to a socket, which is what a reverse shell actually is at the syscall layer, shows up. Neither of those has a tidy log entry the way a Windows process creation does. They exist as syscalls or they don't exist at all, which is exactly why the sensor has to sit that low.
+
+The attacker box on the network is a Linux machine too, but deliberately uninstrumented. It's where I run Metasploit and generate the activity everything else is watching for. Nothing on it ships to Splunk, because in a real environment the attacker's machine is the one thing you never get telemetry from. The whole exercise is catching them with what the victims produce.
 
 ## The collection tier: Splunk
 
