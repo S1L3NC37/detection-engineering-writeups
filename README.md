@@ -45,7 +45,7 @@ Host and cloud telemetry lands in Splunk across purpose-built indexes. Network t
 |---|---|
 | `winlogs` | Windows Security and System event logs |
 | `sysmon` | Sysmon (sysmon-modular config) |
-| `etw` | ETW providers via SilkETW |
+| `etw` | ETW providers (index created, not yet fed) |
 | `linux` | auditd via Laurel |
 | `kube` | Kubernetes audit logs via OTel collector |
 | `azure` | Entra ID sign-in and audit logs via Event Hub |
@@ -55,7 +55,7 @@ Host and cloud telemetry lands in Splunk across purpose-built indexes. Network t
 
 ### Tooling
 
-Splunk Enterprise 9.3.2 · Splunk Universal Forwarder · Splunk Add-on for AWS · Splunk Add-on for Microsoft Cloud Services · Splunk OpenTelemetry Collector · Malcolm · Sysmon + [sysmon-modular](https://github.com/olafhartong/sysmon-modular) · SilkETW · Laurel + auditd ([Neo23x0 ruleset](https://github.com/Neo23x0/auditd)) · Minikube + kubectl + Helm · Azure Event Hubs + Entra ID diagnostic settings · AWS CloudTrail + S3
+Splunk Enterprise 9.3.2 · Splunk Universal Forwarder · Splunk Add-on for AWS · Splunk Add-on for Microsoft Cloud Services · Splunk OpenTelemetry Collector · Malcolm · Sysmon + [sysmon-modular](https://github.com/olafhartong/sysmon-modular) · Laurel + auditd ([Neo23x0 ruleset](https://github.com/Neo23x0/auditd)) · Minikube + kubectl + Helm · Azure Event Hubs + Entra ID diagnostic settings · AWS CloudTrail + S3
 
 ---
 
