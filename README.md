@@ -73,6 +73,6 @@ Splunk Enterprise 9.3.2 · Splunk Universal Forwarder · Splunk Add-on for AWS �
 
 ## Background
 
-I built this lab while working through [Constructing Defense](https://justhacking.com) by Anton Ovrutsky (justhacking.com). I took the Lite track, which means no provided cyber range: I stood up the entire environment myself, on my own hardware.
+I built this lab while working through [Constructing Defense](https://www.justhacking.com/course/condef-lite/)) by Anton Ovrutsky (justhacking.com). I took the Lite track, which means no provided cyber range: I stood up the entire environment myself, on my own hardware.
 
 I followed the course's guidance for the lab architecture and the telemetry configuration. What I own is everything between the instruction and the working system: standing it up under a RAM constraint the guidance doesn't account for, diagnosing what broke, and understanding why each piece is there rather than just that it worked. The detection writeups run against my own environment, so the false positives I had to tune out are specific to my lab, not lifted from a worked example. The queries follow the techniques I was learning; the tuning is where I had to reason about my own data.
