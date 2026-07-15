@@ -152,11 +152,11 @@ index=sysmon
 ![Command lines over 2000 characters](images/first-shell-det2-threshold.png)
 *Filtering to command lines over 2,000 characters. A legitimate long-liner (the Edge updater) still shows up, which is what the parent filter cleans up.*
 
-That still left a few false positives. Some legitimate software genuinely does run long command lines. So rather than keep chasing the threshold up forever, I did something better.
+That still left a few false positives. Some legitimate software genuinely does run long command lines. Chasing the threshold higher and higher is a losing game, though, so the better move is to stop relying on length alone.
 
 ## 6. Combining the two
 
-Detection 1 and Detection 2 each have false positives on their own. Plenty of things spawn from a non-`explorer.exe` parent. A few things run very long command lines. But almost _nothing_ legitimate does both at once: launches from an unusual parent AND carries a multi-thousand-character command line. The intersection of two weak signals is a strong one.
+Detection 1 and Detection 2 each have false positives on their own. Plenty of things spawn from a non-`explorer.exe` parent. A few things run very long command lines. But almost _nothing_ legitimate does both at once: launches from an unusual parent AND carries a multi-thousand-character command line. Combining two weak signals into one stronger one is a standard way out of this, and it fits here perfectly.
 
 ```spl
 index=sysmon
