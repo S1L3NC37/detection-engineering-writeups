@@ -18,12 +18,17 @@ How the environment is put together and why. The network, the domain, endpoint t
 **[Catching My First Reverse Shell](catching-my-first-reverse-shell.md)**
 I detonated a Meterpreter reverse shell against a Windows workstation, then built two Splunk detections that catch it from different angles: one on the process that spawned it, one on the length of the command line that launched it. Covers why each signal works, where each one produces false positives, and why combining two weak signals beats tuning either one alone.
 
+**[Catching LSASS Credential Dumping](catching-lsass-credential-dumping.md)**
+I dumped LSASS three different ways (Mimikatz through a Meterpreter session, Windows Task Manager, and Procdump) and found they all reduce to the same behavior at the sensor: a process opening a handle to lsass.exe with the memory-read right set. Covers building the detection up query by query, why no single event type caught all three, and the false positives the signal drags in.
+
 ### Detection catalog
 
 | Detection | Platform | Telemetry | ATT&CK | Status |
 |---|---|---|---|---|
 | [Reverse shell: anomalous parent process](catching-my-first-reverse-shell.md) | Windows | `sysmon` EID 1 | [T1059.003](https://attack.mitre.org/techniques/T1059/003/) | Published |
 | [Reverse shell: command-line length](catching-my-first-reverse-shell.md) | Windows | `sysmon` EID 1 | [T1059.001](https://attack.mitre.org/techniques/T1059/001/) | Published |
+| [LSASS memory: process-access rights](catching-lsass-credential-dumping.md) | Windows | `sysmon` EID 10 | [T1003.001](https://attack.mitre.org/techniques/T1003/001/) | Published |
+| [LSASS memory: dump-file creation](catching-lsass-credential-dumping.md) | Windows | `sysmon` EID 11 | [T1003.001](https://attack.mitre.org/techniques/T1003/001/) | Published |
 
 More detections are in progress and get added as they land, each with its ATT&CK mapping and the false positives I had to tune out.
 
@@ -73,6 +78,6 @@ Splunk Enterprise 9.3.2 · Splunk Universal Forwarder · Splunk Add-on for AWS �
 
 ## Background
 
-I built this lab while working through [Constructing Defense](https://www.justhacking.com/course/condef-lite/)) by Anton Ovrutsky (justhacking.com). I took the Lite track, which means no provided cyber range: I stood up the entire environment myself, on my own hardware.
+I built this lab while working through [Constructing Defense](https://www.justhacking.com/course/condef-lite/) by Anton Ovrutsky (justhacking.com). I took the Lite track, which means no provided cyber range: I stood up the entire environment myself, on my own hardware.
 
 I followed the course's guidance for the lab architecture and the telemetry configuration. What I own is everything between the instruction and the working system: standing it up under a RAM constraint the guidance doesn't account for, diagnosing what broke, and understanding why each piece is there rather than just that it worked. The detection writeups run against my own environment, so the false positives I had to tune out are specific to my lab, not lifted from a worked example. The queries follow the techniques I was learning; the tuning is where I had to reason about my own data.
