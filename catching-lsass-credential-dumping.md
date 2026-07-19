@@ -54,6 +54,7 @@ meterpreter > creds_all
 [*] Retrieving all credentials
 ```
 
+![](images/loadkiwi1.png)
 
 This did not work on the first attempt. I ran `creds_all` and it timed out. I tried again, same timeout. I ran `getuid` and that timed out too, which made it look like my session had died. When I checked the Windows VM, it had suspended itself. I resumed it, retried the whole thing, and `creds_all` worked. Worth writing down because a suspended target looks exactly like a dead session, and the fix was just resuming the VM, not rebuilding the session.
 
@@ -263,10 +264,28 @@ If this fired at 2am I would:
 
 ## Key takeaways
 
-- Three different tools, one sub-technique (T1003.001), and one behavioral invariant: a handle to LSASS carrying `PROCESS_VM_READ`. Building the detection on the primitive instead of the tool is what makes it survive a tool swap.
-- No single event type covered everything. ProcessAccess missed Task Manager, FileCreate missed in-memory Mimikatz. Watching both, and normalizing the actor field across them, was necessary to see all three procedures.
-- The access mask is a triage signal, not a verdict. A benign process (winlogon, `0x1010`) and a malicious one (Meterpreter, `0x1410`) can sit one bit apart, so the VM_READ bit plus a good baseline does the real work, not the size of the mask.
-- Allowlisting known-good processes is unavoidable for keeping the detection quiet, but the list is specific to this lab and would have to be rebuilt from scratch in any other environment.
+This lab taught me more than just how to catch LSASS dumps. Here are the things I'm taking forward:
+
+1. **Behavioral primitives beat tool names.** Mimikatz, Procdump, and Task Manager look nothing alike, different binaries, different parents, different execution styles. But they all have to open a handle to `lsass.exe` with the `PROCESS_VM_READ` bit set. That shared primitive is what actually matters. I'm going to keep asking "what is the one thing every version of this technique has to do?" instead of chasing individual tools.
+
+2. **One event type is almost never enough.** Task Manager never showed up in ProcessAccess events in my data, only in FileCreate. The in-memory Mimikatz run never wrote a file at all. I had to watch both EID 10 and EID 11 and line them up. That gap surprised me and is something I'll remember every time I build a new detection.
+
+3. **GrantedAccess is powerful but you can't treat it like a perfect fingerprint.** The exact mask varies by tool (`0x1010`, `0x1410`, `0x1fffff`), and even benign processes can sit one bit away from malicious ones. The real signal is the VM_READ bit plus "not on my baseline." I'll use the full mask for triage priority, not as the sole detection logic.
+
+4. **Baselining is non-negotiable.** `csrss.exe`, `wininit.exe`, and `winlogon.exe` touch LSASS all the time. Without subtracting the known-good, you drown in noise. Every high-value detection needs its own environment-specific allowlist.
+
+5. **Understand why the attack works in the first place.** LSASS dumping isn't a bug, it's a consequence of how Windows does single sign-on. Turning off LSA Protection and Defender for the lab made me appreciate what those controls are actually doing. Seeing how easily the dump worked with LSA Protection off made me want to understand the prevention side (things like PPL and Credential Guard) properly next.
+
+6. **Testing more than one procedure builds real confidence.** Using an in-memory offensive tool, a signed Sysinternals binary, and a built-in Windows feature gave me much higher confidence that the detection held up than any single one would have. I'll try to test a technique more than one way going forward.
+
+7. **Document the mess, not just the win.** Writing down the limitations, the false positives I had to tune, and the things that didn't work the first time made the whole exercise more valuable. Being honest about the gaps forces better thinking.
+
+A couple of extra things that stuck with me:
+- Clean lab data is great for learning, but real environments are noisy. Expect tuning.
+- Good detections should help the analyst at 2 a.m.: what to check first, what the likely next steps are.
+- Turning labs into writeups compounds the learning. The act of explaining it clearly made me understand it better.
+
+This shifted how I think about detection work. I'm less interested in "catch this specific tool" and more focused on the underlying behavior now.
 
 ---
 
