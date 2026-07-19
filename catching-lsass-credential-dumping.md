@@ -54,7 +54,6 @@ meterpreter > creds_all
 [*] Retrieving all credentials
 ```
 
-![](images/loadkiwi1.png)
 
 This did not work on the first attempt. I ran `creds_all` and it timed out. I tried again, same timeout. I ran `getuid` and that timed out too, which made it look like my session had died. When I checked the Windows VM, it had suspended itself. I resumed it, retried the whole thing, and `creds_all` worked. Worth writing down because a suspended target looks exactly like a dead session, and the fix was just resuming the VM, not rebuilding the session.
 
