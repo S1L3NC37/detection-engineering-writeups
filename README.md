@@ -5,7 +5,6 @@ I built a fully monitored environment from scratch and I write detections agains
 Each detection writeup follows the same shape: run the technique in the lab, find the telemetry it produced, work out the signal that separates it from normal activity, and then tune it against the false positives that signal drags in. The queries are the easy part. The reasoning behind them is what I am actually practicing.
 
 **Status:** the lab build is complete and written up, and detection writeups are going up as I finish them.
-
 > **Safety:** this is an isolated lab on a NAT'd subnet. All credentials are throwaway values and all cloud resources use disposable accounts. Nothing here is production.
 
 ---
@@ -18,17 +17,17 @@ How the environment is put together and why. The network, the domain, endpoint t
 **[Catching My First Reverse Shell](catching-my-first-reverse-shell.md)**
 I detonated a Meterpreter reverse shell against a Windows workstation, then built two Splunk detections that catch it from different angles: one on the process that spawned it, one on the length of the command line that launched it. Covers why each signal works, where each one produces false positives, and why combining two weak signals beats tuning either one alone.
 
-**[Catching LSASS Credential Dumping](catching-lsass-credential-dumping.md)**
-I dumped LSASS three different ways (Mimikatz through a Meterpreter session, Windows Task Manager, and Procdump) and found they all reduce to the same behavior at the sensor: a process opening a handle to lsass.exe with the memory-read right set. Covers building the detection up query by query, why no single event type caught all three, and the false positives the signal drags in.
+**[Catching Credential Access Through File Shares](catching-credential-access-through-file-shares.md)**
+I stood up file shares in the domain, planted a fake passwords.txt, and ran Snaffler against them to crawl the estate. Then I built Splunk detections off Windows event 5145: one that flags access to sensitive files by name, and one that catches the scan itself by failure volume. Covers the detection primitive and its fields, the audit policy the whole thing silently depends on, the false positives the failure threshold drags in, and how the network layer in Malcolm corroborates the same activity independent of host logging.
 
 ### Detection catalog
 
-| Detection | Platform | Telemetry | ATT&CK | Status |
-|---|---|---|---|---|
-| [Reverse shell: anomalous parent process](catching-my-first-reverse-shell.md) | Windows | `sysmon` EID 1 | [T1059.003](https://attack.mitre.org/techniques/T1059/003/) | Published |
-| [Reverse shell: command-line length](catching-my-first-reverse-shell.md) | Windows | `sysmon` EID 1 | [T1059.001](https://attack.mitre.org/techniques/T1059/001/) | Published |
-| [LSASS memory: process-access rights](catching-lsass-credential-dumping.md) | Windows | `sysmon` EID 10 | [T1003.001](https://attack.mitre.org/techniques/T1003/001/) | Published |
-| [LSASS memory: dump-file creation](catching-lsass-credential-dumping.md) | Windows | `sysmon` EID 11 | [T1003.001](https://attack.mitre.org/techniques/T1003/001/) | Published |
+| Detection                                                                                       | Platform | Telemetry           | ATT&CK                                                      | Status    |
+| ----------------------------------------------------------------------------------------------- | -------- | ------------------- | ---------------------------------------------------------- | --------- |
+| [Reverse shell: anomalous parent process](catching-my-first-reverse-shell.md)                   | Windows  | `sysmon` EID 1      | [T1059.003](https://attack.mitre.org/techniques/T1059/003/) | Published |
+| [Reverse shell: command-line length](catching-my-first-reverse-shell.md)                        | Windows  | `sysmon` EID 1      | [T1059.001](https://attack.mitre.org/techniques/T1059/001/) | Published |
+| [Sensitive file access on shares](catching-credential-access-through-file-shares.md)            | Windows  | `winlogs` EID 5145  | [T1552.001](https://attack.mitre.org/techniques/T1552/001/) | Published |
+| [Share enumeration by failure volume](catching-credential-access-through-file-shares.md)        | Windows  | `winlogs` EID 5145  | [T1135](https://attack.mitre.org/techniques/T1135/)         | Published |
 
 More detections are in progress and get added as they land, each with its ATT&CK mapping and the false positives I had to tune out.
 
@@ -36,19 +35,17 @@ More detections are in progress and get added as they land, each with its ATT&CK
 
 ## Lab architecture
 
-![Detection lab architecture](images/lab-topology.png)
-
 **Domain:** `condef.local` · **Network:** VMware NAT `192.168.137.0/24` (gateway `.2`)
 
-| Host | Address | Role |
-|---|---|---|
-| DC | `192.168.137.135` | Windows Server 2019: domain controller, DNS, **Splunk Enterprise 9.3.2** |
-| CERTER | `192.168.137.136` | Member server, Sysmon config-push host |
-| Win11V | `192.168.137.137` | Domain-joined workstation (Sysmon), primary detonation target |
-| Win11A | `192.168.137.138` | Domain-joined workstation (Sysmon) |
-| LinuxA | `192.168.137.139` | Attacker box: Metasploit, later Mythic C2 |
-| Malcolm | `192.168.137.140` | Network traffic analysis appliance |
-| LinuxV | `192.168.137.141` | Minikube / Kubernetes host, auditd and Laurel telemetry |
+| Host    | Address           | Role                                                                     |
+| ------- | ----------------- | ------------------------------------------------------------------------ |
+| DC      | `192.168.137.135` | Windows Server 2019: domain controller, DNS, **Splunk Enterprise 9.3.2** |
+| CERTER  | `192.168.137.136` | Member server, Sysmon config-push host                                   |
+| Win11V  | `192.168.137.137` | Domain-joined workstation (Sysmon), primary detonation target            |
+| Win11A  | `192.168.137.138` | Domain-joined workstation (Sysmon)                                       |
+| LinuxA  | `192.168.137.139` | Attacker box: Metasploit, later Mythic C2                                |
+| Malcolm | `192.168.137.140` | Network traffic analysis appliance                                       |
+| LinuxV  | `192.168.137.141` | Minikube / Kubernetes host, auditd and Laurel telemetry                  |
 
 Every VM runs on one physical host with 32 GB of RAM. Their combined minimum allocation is closer to 44 GB, so they cannot all run at once. Deciding which of them coexist turned out to be the most instructive constraint in the whole build.
 
@@ -58,15 +55,15 @@ LinuxA is the attacker box, and it's the only machine in the lab deliberately le
 
 Host and cloud telemetry lands in Splunk across purpose-built indexes. Network traffic is analyzed separately in Malcolm, and detections correlate across both.
 
-| Index | Source |
-|---|---|
-| `winlogs` | Windows Security and System event logs |
-| `sysmon` | Sysmon (sysmon-modular config) |
-| `etw` | ETW providers (index created, not yet fed) |
-| `linux` | auditd via Laurel |
-| `kube` | Kubernetes audit logs via OTel collector |
-| `azure` | Entra ID sign-in and audit logs via Event Hub |
-| `aws` | CloudTrail via S3 |
+| Index     | Source                                        |
+| --------- | --------------------------------------------- |
+| `winlogs` | Windows Security and System event logs        |
+| `sysmon`  | Sysmon (sysmon-modular config)                |
+| `etw`     | ETW providers (index created, not yet fed)    |
+| `linux`   | auditd via Laurel                             |
+| `kube`    | Kubernetes audit logs via OTel collector      |
+| `azure`   | Entra ID sign-in and audit logs via Event Hub |
+| `aws`     | CloudTrail via S3                             |
 
 **Ingest routes:** Universal Forwarder push on `9997`, HTTP Event Collector push on `8088`, S3 pull for AWS, Event Hub consume for Azure. Two push, two pull, with different failure modes each. Malcolm captures off the virtual network in promiscuous mode.
 
