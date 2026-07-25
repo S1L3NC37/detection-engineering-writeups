@@ -17,8 +17,14 @@ How the environment is put together and why. The network, the domain, endpoint t
 **[Catching My First Reverse Shell](catching-my-first-reverse-shell.md)**
 I detonated a Meterpreter reverse shell against a Windows workstation, then built two Splunk detections that catch it from different angles: one on the process that spawned it, one on the length of the command line that launched it. Covers why each signal works, where each one produces false positives, and why combining two weak signals beats tuning either one alone.
 
+**[Catching LSASS Credential Dumping Three Ways With One Detection Primitive](catching-lsass-credential-dumping.md)**
+I dumped LSASS three different ways (Mimikatz through Meterpreter, Task Manager, and Procdump) and built one Sysmon detection that catches all three, because underneath the different tools they all have to open a handle to lsass.exe with the memory-read right set. Covers the GrantedAccess bitmask primitive and why the VM_READ bit is the invariant, how a benign process (winlogon) sits one bit away from the malicious one, the baseline-then-subtract approach to cut system noise, why catching every procedure needs both ProcessAccess and FileCreate events, and the false positives the loose file match drags in.
+
 **[Catching Credential Access Through File Shares](catching-credential-access-through-file-shares.md)**
 I stood up file shares in the domain, planted a fake passwords.txt, and ran Snaffler against them to crawl the estate. Then I built Splunk detections off Windows event 5145: one that flags access to sensitive files by name, and one that catches the scan itself by failure volume. Covers the detection primitive and its fields, the audit policy the whole thing silently depends on, the false positives the failure threshold drags in, and how the network layer in Malcolm corroborates the same activity independent of host logging.
+
+**[Catching Kerberoasting](catching-kerberoasting.md)**
+I created service accounts with SPNs in the domain, then roasted them with Impacket's GetUserSPNs to pull crackable service tickets. From the Windows 4769 events I built a Splunk detection that flags one account requesting many distinct service tickets in a short window, then found the same activity on the network in Malcolm. Covers why volume rather than encryption type is the durable signal in a modern AES domain, how the same roast reads from both the host logs and the wire, and closing the loop by cracking a captured ticket back to its plaintext password.
 
 ### Detection catalog
 
@@ -26,8 +32,11 @@ I stood up file shares in the domain, planted a fake passwords.txt, and ran Snaf
 | ----------------------------------------------------------------------------------------------- | -------- | ------------------- | ---------------------------------------------------------- | --------- |
 | [Reverse shell: anomalous parent process](catching-my-first-reverse-shell.md)                   | Windows  | `sysmon` EID 1      | [T1059.003](https://attack.mitre.org/techniques/T1059/003/) | Published |
 | [Reverse shell: command-line length](catching-my-first-reverse-shell.md)                        | Windows  | `sysmon` EID 1      | [T1059.001](https://attack.mitre.org/techniques/T1059/001/) | Published |
+| [LSASS memory access by GrantedAccess rights](catching-lsass-credential-dumping.md)             | Windows  | `sysmon` EID 10     | [T1003.001](https://attack.mitre.org/techniques/T1003/001/) | Published |
+| [LSASS dump file creation](catching-lsass-credential-dumping.md)                                | Windows  | `sysmon` EID 11     | [T1003.001](https://attack.mitre.org/techniques/T1003/001/) | Published |
 | [Sensitive file access on shares](catching-credential-access-through-file-shares.md)            | Windows  | `winlogs` EID 5145  | [T1552.001](https://attack.mitre.org/techniques/T1552/001/) | Published |
 | [Share enumeration by failure volume](catching-credential-access-through-file-shares.md)        | Windows  | `winlogs` EID 5145  | [T1135](https://attack.mitre.org/techniques/T1135/)         | Published |
+| [Kerberoasting: service ticket request volume](catching-kerberoasting.md)                       | Windows  | `winlogs` EID 4769  | [T1558.003](https://attack.mitre.org/techniques/T1558/003/) | Published |
 
 More detections are in progress and get added as they land, each with its ATT&CK mapping and the false positives I had to tune out.
 
