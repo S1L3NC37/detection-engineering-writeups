@@ -11,7 +11,7 @@
 
 ## TL;DR
 
-Any domain user can request a service ticket for an account that has an SPN, and that ticket comes back encrypted with the account's password. Request a pile of them and the weak ones can be cracked offline. The requests show up as Event ID 4769 on the DC and on the wire in Zeek, so I caught the roast from both the host and the network, then cracked one ticket back to its plaintext password.
+Any domain user can request a service ticket for an account that has an SPN, and that ticket comes back encrypted with the account's password, so the weak ones can be cracked offline. Whatever tool runs the attack, it has to make those requests, and they land as a burst of Event ID 4769s: one account asking the DC for tickets to many different SPNs in a short window. That burst is the primitive I built the detection on, caught on the host in Splunk and on the wire in Malcolm, and I finished by cracking a captured ticket back to its plaintext password.
 
 ## What it is
 
