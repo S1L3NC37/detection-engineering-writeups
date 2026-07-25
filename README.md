@@ -2,7 +2,7 @@
 
 I built a fully monitored environment from scratch and I write detections against it, mapped to MITRE ATT&CK, across Windows and Active Directory, Linux, Kubernetes, and cloud (Entra ID and AWS).
 
-Each detection writeup follows the same shape: run the technique in the lab, find the telemetry it produced, work out the signal that separates it from normal activity, and then tune it against the false positives that signal drags in. The queries are the easy part. The reasoning behind them is what I am actually practicing.
+Each detection writeup follows roughly the same shape: run the technique in the lab, find the telemetry it produced, work out the signal that separates it from normal activity, and, where the signal needs it, tune it against the false positives it drags in. The queries are the easy part. The reasoning behind them is what I am actually practicing.
 
 **Status:** the lab build is complete and written up, and detection writeups are going up as I finish them.
 > **Safety:** this is an isolated lab on a NAT'd subnet. All credentials are throwaway values and all cloud resources use disposable accounts. Nothing here is production.
@@ -38,7 +38,7 @@ I created service accounts with SPNs in the domain, then roasted them with Impac
 | [Share enumeration by failure volume](catching-credential-access-through-file-shares.md)        | Windows  | `winlogs` EID 5145  | [T1135](https://attack.mitre.org/techniques/T1135/)         | Published |
 | [Kerberoasting: service ticket request volume](catching-kerberoasting.md)                       | Windows  | `winlogs` EID 4769  | [T1558.003](https://attack.mitre.org/techniques/T1558/003/) | Published |
 
-More detections are in progress and get added as they land, each with its ATT&CK mapping and the false positives I had to tune out.
+More detections are in progress and get added as they land, each with its ATT&CK mapping.
 
 ---
 
@@ -86,4 +86,4 @@ Splunk Enterprise 9.3.2 · Splunk Universal Forwarder · Splunk Add-on for AWS �
 
 I built this lab while working through [Constructing Defense](https://www.justhacking.com/course/condef-lite/) by Anton Ovrutsky (justhacking.com). I took the Lite track, which means no provided cyber range: I stood up the entire environment myself, on my own hardware.
 
-I followed the course's guidance for the lab architecture and the telemetry configuration. What I own is everything between the instruction and the working system: standing it up under a RAM constraint the guidance doesn't account for, diagnosing what broke, and understanding why each piece is there rather than just that it worked. The detection writeups run against my own environment, so the false positives I had to tune out are specific to my lab, not lifted from a worked example. The queries follow the techniques I was learning; the tuning is where I had to reason about my own data.
+I followed the course's guidance for the lab architecture and the telemetry configuration. What I own is everything between the instruction and the working system: standing it up under a RAM constraint the guidance doesn't account for, diagnosing what broke, and understanding why each piece is there rather than just that it worked. The detection writeups run against my own environment, so where I do tune out false positives, they are specific to my lab, not lifted from a worked example. The queries follow the techniques I was learning; the reasoning is where I had to work with my own data.
