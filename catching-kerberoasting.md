@@ -25,15 +25,15 @@ Mitre's info page on this technique: https://attack.mitre.org/techniques/T1558/0
 
 To have something worth roasting, I need some accounts with SPNs set, so I create a handful on the DC. I open up Windows PowerShell ISE on the DC, paste the script in, and run it.
 
-![](images/01-spn-accounts-created.png)
+![](images/spn-accounts.png)
 
 For this I have three of my VMs up: the DC, my capture box (Malcolm), and my attacker box (LinuxA).
 
 ## Running the attack
 
-For the attack itself I used Impacket's GetUserSPNs, run from my attacker box (LinuxA). Before installing anything I checked whether it was already on the box.
+For the attack itself I used Impacket's GetUserSPNs, run from my attacker box (LinuxA). Impacket is a widely used set of Python tools for working with Windows network protocols, and GetUserSPNs is the one that does the roast: it finds the accounts that have an SPN set and requests a service ticket for each. Before installing anything I checked whether it was already on the box.
 
-![](images/02-getuserspns-available.png)
+![](images/impacket1.png)
 
 It's there and available so I run:
 
@@ -43,7 +43,7 @@ GetUserSPNs.py condef.local/Administrator -dc-ip 192.168.137.135 -request -outpu
 
 Then I look at the output file with `cat kerbtickets.txt`:
 
-![](images/03-captured-hashes.png)
+![](images/kerb1.png)
 
 There they are, the crackable password hashes for each of the SPN accounts. I come back to cracking one at the end. First though, the part I actually care about is what this whole thing left behind in the logs.
 
@@ -57,7 +57,7 @@ index=winlogs
 | stats dc(ServiceName) as TicketRequestedCount,values(ServiceName) as ServicesRequested by TargetUserName
 ```
 
-![](images/04-4769-ticket-count.png)
+![](images/kerb2.png)
 
 This gives me the account doing the asking, how many tickets it pulled, and which services it pulled them for.
 
@@ -65,7 +65,7 @@ The reason this stands out to me is that a normal user asks for a ticket when th
 
 There is one more field on the 4769 worth pulling in, TicketEncryptionType.
 
-![](images/05-ticket-encryption-type.png)
+![](images/ticket-encryption-type.png)
 
 Microsoft's documentation on it: https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4769
 
@@ -79,7 +79,7 @@ index=winlogs
 | stats dc(ServiceName) as TicketRequestedCount,values(ServiceName) as ServicesRequested,values(TicketEncryptionType) as EncryptionTypes by TargetUserName
 ```
 
-![](images/06-4769-with-enctypes.png)
+![](images/kerb4.png)
 
 The raw values are hex, so I had Splunk map them to their readable names with a case statement:
 
@@ -90,7 +90,7 @@ index=winlogs
 | stats dc(ServiceName) as TicketRequestedCount,values(ServiceName) as ServicesRequested,values(Ticket_Type_Translate) as EncryptionTypes by TargetUserName
 ```
 
-![](images/07-4769-enctypes-translated.png)
+![](images/kerb5.png)
 
 Binning by the hour, one bucket jumps right out with eight ticket requests from a single account. Pretty suspicious.
 
@@ -105,7 +105,7 @@ index=winlogs EventCode=4769 TicketEncryptionType="0x12"
 
 This narrows to the encryption type I am dealing with and only fires when one account asked for more than five tickets inside an hour bucket.
 
-![](images/08-kerberoast-alert.png)
+![](images/kerb6.png)
 
 ## The network view
 
@@ -115,11 +115,11 @@ I also wanted to see the roast on the network, not just in the DC's logs. The ni
 zeek.kerberos.cipher == aes256-cts-hmac-sha1-96 && zeek.kerberos.request_type == TGS
 ```
 
-![](images/09-arkime-search.png)
+![](images/kerb7.png)
 
 Then in the Connections tab I set the source node to `zeek.kerberos.cname` and the destination to `zeek.kerberos.sname`, which graphs each requesting account against the services it asked for:
 
-![](images/10-arkime-connection-graph.png)
+![](images/kerb8.png)
 
 The account doing the roasting is Administrator/CONDEF.LOCAL, and everything it points at is an account I roasted. One account fanning out to a whole cluster of service names at once is the roast, and it is the same picture Splunk gave me, just from the network side instead of the DC.
 
@@ -133,7 +133,7 @@ My hashes came back as AES256, so the matching hashcat mode is 19700 (Kerberos 5
 hashcat -m 19700 -a 0 onehash.txt rockyou.txt --force
 ```
 
-![](images/11-hashcat-cracked.png)
+![](images/hashcat2.png)
 
 It ran at around 12,000 guesses per second and recovered the password, `Password123!`, for the User1 account. That closes the loop: I went from requesting a ticket as a normal user all the way to a service account's cleartext password.
 
