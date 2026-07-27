@@ -10,9 +10,11 @@ This is part of a home lab I built to teach myself detection engineering hands-o
 
 ## 1. What the attacker is doing
 
-A reverse shell is one of the most common ways an attacker turns a foothold into real control of a machine. Instead of the attacker reaching into the victim (which a firewall usually blocks), the victim reaches _out_ to the attacker. Outbound connections tend to sail through firewalls that would stop an inbound one, so this "call me, I won't call you" pattern is everywhere in real intrusions.
+A reverse shell causes the targeted system to initiate a connection back to an attacker-controlled listener. Because the connection originates from the target, it may bypass controls that prevent unsolicited inbound connections.
 
-The version I used wraps a Meterpreter payload inside a PowerShell command. Meterpreter is a feature-rich remote-control agent that, once running, lives in memory and stays quiet, so it is a realistic stand-in for what an attacker would actually drop. The stealth is in the agent, though, not in how it arrives: the payload has to launch as a long, encoded PowerShell one-liner that decodes and runs shellcode in memory. So the delivery is loud even when the thing it delivers is quiet, and that loud delivery is what I wanted to learn to catch. A hidden PowerShell process carrying a wall of base64 is a shape that very little legitimate activity produces.
+For this exercise, I used `msfvenom` with the `psh-cmd` output format. The generated command wrapped a Meterpreter payload inside a long, encoded, and compressed PowerShell command. I intentionally disabled several Windows protections so the payload could execute and produce telemetry for analysis.
+
+My goal was not to evaluate Meterpreter's stealth or demonstrate defense evasion. I focused on two execution artifacts produced by this specific payload: PowerShell spawning `cmd.exe` and the unusually long command line carrying the encoded content. A hidden PowerShell process carrying a wall of base64 is a shape that very little legitimate activity produces.
 
 ## 2. How I ran it in my lab
 
