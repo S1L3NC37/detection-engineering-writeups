@@ -83,7 +83,9 @@ Worth noting: my telemetry even tagged the event with `technique_id=T1059.003` o
 
 ## 4. Detection 1: a command prompt with the wrong parent
 
-The reasoning here is about process lineage. When a person opens a Command Prompt the normal way, by clicking it or searching for it, the process that launches it is `explorer.exe`, the Windows shell. That is the fingerprint of a human sitting at the keyboard. So a `cmd.exe` whose parent is _not_ `explorer.exe` is worth a hard look, because something automated launched it.
+The reasoning here is about process lineage. In my manual comparison, the Command Prompt I opened normally traced back to `explorer.exe`. The Command Prompt created through the Meterpreter session instead traced back to a hidden PowerShell process. That difference gave me an initial detection hypothesis: search for `cmd.exe` processes whose parent is not `explorer.exe`, then investigate and tune the legitimate alternatives present in my environment.
+
+This is not a universal rule that every non-`explorer.exe` parent is malicious. As the results below show, VMware Tools, Splunk, Windows services, and other legitimate software can also launch Command Prompt.
 
 My first pass was deliberately naive, just to see the shape of the data:
 
