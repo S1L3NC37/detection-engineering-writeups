@@ -135,9 +135,9 @@ hashcat -m 19700 -a 0 onehash.txt rockyou.txt --force
 
 ![](images/11-hashcat-cracked.png)
 
-It ran at around 12,000 guesses per second and recovered the password, `Password123!`, for the User1 account. That closes the loop: I went from requesting a ticket as a normal user all the way to a service account's cleartext password.
+It ran at around 12,000 guesses per second and recovered the password, `Password123!`, for the User1 account. That closes the technical loop: I generated the service-ticket requests, captured an AES256 ticket, and recovered the weak password protecting the service account.
 
-One thing I noticed is that 12,000 guesses a second against AES256 is slow. The same hash as RC4 would run in the hundreds of millions per second on the same box. That speed gap is why attackers reach for RC4, and why keeping service accounts on AES makes cracking the result a lot more expensive.
+For this lab exercise, I authenticated to `GetUserSPNs.py` with the domain Administrator account to generate representative Kerberoasting telemetry. This execution therefore demonstrates the ticket-requesting, detection, and offline-cracking workflow, but it does not reproduce the full attack path from a low-privileged account.
 
 ## Key takeaways
 
