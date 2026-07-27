@@ -1,204 +1,355 @@
-# Catching LSASS Credential Dumping Three Ways With One Detection Primitive
+# Catching LSASS Credential Dumping Three Ways
 
+**Status:** Lab validated / experimental
 **Lab:** `condef.local`
 **Date:** 2026-07-18
-**Platform(s):** Windows
-**Primary log source(s):** Sysmon (ProcessAccess EID 10, FileCreate EID 11)
+**Platform:** Windows
+**Primary log sources:** Sysmon ProcessAccess Event ID 10 · Sysmon FileCreate Event ID 11
 **SIEM:** Splunk
-**ATT&CK:** T1003.001, OS Credential Dumping: LSASS Memory · Tactic: Credential Access (TA0006)
+**ATT&CK:** [T1003.001 – OS Credential Dumping: LSASS Memory](https://attack.mitre.org/techniques/T1003/001/)
 
 ---
 
-## Summary
+## TL;DR
 
-LSASS holds credential material in memory for every account logged onto a Windows host, so an attacker who can read that memory harvests hashes and tickets without cracking anything. I dumped LSASS three different ways in my lab (Mimikatz through a Meterpreter session, Windows Task Manager, and Procdump) and found that all three collapse to the same behavior at the sensor level: a process opening a handle to `lsass.exe` with the memory-read access right set. The detection keys on that shared primitive rather than on any one tool, which is why a single Sysmon ProcessAccess rule catches all three even though none of them share a binary, a parent, or a file artifact.
+I tested three procedures for accessing or dumping LSASS memory:
 
-## Attack overview
+* Mimikatz through a Meterpreter session
+* Windows Task Manager
+* Microsoft Sysinternals Procdump
 
-LSASS (Local Security Authority Subsystem Service, `lsass.exe`, running from `C:\Windows\System32`) is the Windows process that handles proving who you are and enforcing what that identity is allowed to do. A few things it does that matter here:
+The three procedures did not produce identical telemetry in my lab.
 
-- **Authentication broker.** When you log on, LSASS validates the credentials. Locally it checks against the SAM database. On a domain-joined box it hands the work to the right authentication package and talks to the domain controller.
-- **Runs the authentication packages.** Kerberos, NTLM, Digest, CredSSP, WDigest and others are DLLs loaded inside LSASS. Each implements a protocol and each needs credential material to do its job, which is why all of that material ends up resident in one process.
-- **Issues access tokens.** After a successful logon LSASS creates the token attached to your session and every process you spawn, carrying your SID and group memberships.
-- **Enforces local security policy** and writes the Security event log, which is why events like 4624, 4625, and 4672 come from LSASS.
+Mimikatz and Procdump generated Sysmon ProcessAccess events showing processes opening handles to `lsass.exe`. Task Manager did not produce a ProcessAccess event in the data collected by my Sysmon configuration, but it did generate a FileCreate event when it wrote `lsass.DMP`.
 
-To support single sign-on it keeps credential material resident in its own memory for the life of each logon session: NTLM hashes, Kerberos tickets and keys, and on older or misconfigured systems, plaintext passwords. That design is the whole reason attackers target it. Reading LSASS memory is not an exploit, it is a read. A process running with high enough privilege (local admin or SYSTEM) can open a handle to another process and read its memory. The attack just points that capability at the one process that stores every credential on the box, which frequently includes accounts more privileged than the one the attacker started with.
+Covering all three procedures therefore required two complementary detection paths:
 
-This technique shows up constantly in real intrusions. Credential dumping from LSASS is a staple of ransomware crews and hands-on-keyboard operators because it is how they turn a single foothold into domain-wide movement. The three tools I used cover a useful spread: Mimikatz is purpose-built offensive tooling, Procdump is a signed Microsoft Sysinternals utility that admins use legitimately, and Task Manager is a built-in OS binary that every user opens. If one detection can catch all three, it is keying on the behavior and not the tool, which is exactly what I wanted to prove.
+1. ProcessAccess events in which a process accesses `lsass.exe` with memory-read rights
+2. FileCreate events associated with an LSASS dump file
 
-## Lab conditions
+The result is behavior-focused coverage that does not depend on detecting one specific dumping tool.
 
-I disabled a few protections in this lab on purpose so I would get clean, uncontaminated telemetry rather than a truncated event or a blocked action. This is a lab choice, not something you would do in production, and each of these being present in a real environment is itself a control worth having.
+---
 
-- **LSA Protection (RunAsPPL) turned off.** By default a modern Windows host can run `lsass.exe` as a Protected Process Light, which blocks handle opens with memory-read rights even for admin. I set `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\RunAsPPL` to `0` and rebooted so the dumps would succeed and generate the ProcessAccess telemetry I was after. Flipping that key from `1` to `0` is its own detectable event (a registry value change), and in a real environment LSA Protection being on would have blocked or degraded all three of these dumps.
-- **Defender disabled.** With Defender live, loading Mimikatz in memory is exactly the kind of thing that gets flagged and killed on execution.
+## Why Attackers Target LSASS
+
+The Local Security Authority Subsystem Service, or `lsass.exe`, is a core Windows process responsible for authentication and local security policy.
+
+LSASS works with authentication packages such as Kerberos and NTLM and maintains credential-related material needed to support active logon sessions and single sign-on.
+
+Depending on the system configuration and the accounts that have logged on, its memory may contain material such as:
+
+* NTLM password hashes
+* Kerberos tickets
+* Kerberos encryption keys
+* Authentication package data
+* Reusable credential material
+
+An attacker who gains sufficient privileges on a Windows system may attempt to read or dump LSASS memory and extract that material.
+
+This can allow an attacker to move from control of one system to control of additional accounts or systems.
+
+MITRE ATT&CK categorizes this behavior as:
+
+* **Tactic:** Credential Access, TA0006
+* **Technique:** OS Credential Dumping, T1003
+* **Sub-technique:** LSASS Memory, T1003.001
+
+The tools used to perform the dumping are procedures. Mimikatz, Task Manager, and Procdump are different ways of carrying out the same ATT&CK sub-technique.
+
+---
+
+## Lab Conditions
+
+I modified security controls in the isolated lab so the dumping procedures could execute and produce telemetry.
+
+### LSA Protection
+
+I set the following registry value to `0` and restarted the target:
+
+```text id="gqpn49"
+HKLM\SYSTEM\CurrentControlSet\Control\Lsa\RunAsPPL
+```
+
+This disabled LSA Protection for the exercise.
+
+Disabling the protection was a lab decision. In an operational environment, attempts to disable or modify LSASS protections would be valuable security events in their own right.
+
+### Microsoft Defender
+
+I also disabled Microsoft Defender in the lab because it could otherwise detect or block the offensive tooling used in the exercise.
 
 ![](images/lsass-off.png)
 
-## Lab replication
+These changes were made only inside the isolated lab. They are not recommended production settings.
 
-**Environment:** `condef.local` — attacker box (LinuxA, Kali), target workstation (Win11V), telemetry into Splunk on the DC.
+---
 
-I ran three procedures against the same target, all aiming at LSASS memory.
+## Environment
 
-**1. Mimikatz through a Meterpreter session.** I already had a SYSTEM Meterpreter session on Win11V from a PsExec payload. Setting it up was not totally smooth: I first tried to run the handler on lport 443 and the exploit would not execute, so I switched to lport 8443 and it went through.
+| Host     | Role                                     |
+| -------- | ---------------------------------------- |
+| `LinuxA` | Attacker system running Metasploit       |
+| `Win11V` | Windows 11 target                        |
+| `DC`     | Splunk server receiving Sysmon telemetry |
+
+I used three different procedures against LSASS on `Win11V`.
+
+---
+
+## Procedure 1: Mimikatz Through Meterpreter
+
+I already had a SYSTEM-level Meterpreter session on `Win11V` from the earlier PsExec exercise.
+
+My first handler configuration used local port 443, but the exploit did not execute successfully. I changed the local port to 8443 and obtained the session.
 
 ![](images/msfexploitfailtorun.png)
 
-Meterpreter's `kiwi` extension embeds Mimikatz and runs it in memory, so nothing touches disk. Once loaded, `creds_all` reads credential material straight out of LSASS.
+Inside Meterpreter, I loaded the `kiwi` extension and executed:
 
-```
+```text id="0k492h"
 meterpreter > load kiwi
 meterpreter > creds_all
-[+] Running as SYSTEM
-[*] Retrieving all credentials
 ```
 
+The `kiwi` extension provides Mimikatz functionality inside the Meterpreter session.
 
-This did not work on the first attempt. I ran `creds_all` and it timed out. I tried again, same timeout. I ran `getuid` and that timed out too, which made it look like my session had died. When I checked the Windows VM, it had suspended itself. I resumed it, retried the whole thing, and `creds_all` worked. Worth writing down because a suspended target looks exactly like a dead session, and the fix was just resuming the VM, not rebuilding the session.
+My first attempts timed out. Even `getuid` stopped responding, which initially made the Meterpreter session appear dead.
+
+When I checked the Windows VM, I found that it had suspended itself. After resuming the VM and retrying the procedure, the command worked.
 
 ![](images/loadkiwi1-1.png)
 
-**2. Windows Task Manager.** Fully built in. I searched for `lsass` in Task Manager, right-clicked the Local Security Authority Process, and chose Create memory dump file.
+This was a useful troubleshooting lesson: a suspended target can look like a failed or disconnected session even when the attack configuration itself is correct.
+
+This procedure accessed LSASS memory without creating a traditional `.dmp` file.
+
+---
+
+## Procedure 2: Windows Task Manager
+
+I opened Task Manager on `Win11V`, searched for the Local Security Authority Process, right-clicked it, and selected **Create memory dump file**.
 
 ![](images/taskmanagerlsass.png)
 
-Task Manager wrote the dump to the user temp directory and told me exactly where.
+Task Manager reported the location of the resulting dump:
 
 ![](images/creatememorydumpfilelsass.png)
 
-The dump landed at `C:\Users\ADMINI~1\AppData\Local\Temp\lsass.DMP`.
+The file was written to:
 
-**3. Procdump.** I pulled the signed Sysinternals binary down and ran it against LSASS.
+```text id="r80bnh"
+C:\Users\ADMINI~1\AppData\Local\Temp\lsass.DMP
+```
 
-```powershell
+This method used a built-in Windows utility rather than a dedicated offensive tool.
+
+---
+
+## Procedure 3: Procdump
+
+I downloaded the signed Microsoft Sysinternals Procdump utility:
+
+```powershell id="b6u657"
 Invoke-WebRequest -UseBasicParsing https://live.sysinternals.com/procdump.exe -OutFile procdump.exe
+```
+
+I then used it to dump LSASS:
+
+```powershell id="uazga4"
 .\procdump.exe -accepteula -r -ma lsass.exe lsass.dmp
 ```
 
-That produced an 82.7 MB `lsass.dmp` on the Public desktop.
+The procedure created an 82.7 MB file named `lsass.dmp` on the Public desktop.
 
 ![](images/lsassdmp.png)
 
-At this point I had dumped LSASS three ways: Mimikatz in memory, Task Manager to a `.DMP` in temp, and Procdump to a `.dmp` on disk.
+At this point, I had performed the same ATT&CK sub-technique through three different procedures:
 
-## ATT&CK framing
+| Procedure                    | Tool type                             | Result                                                    |
+| ---------------------------- | ------------------------------------- | --------------------------------------------------------- |
+| Mimikatz through Meterpreter | Offensive tooling operating in memory | LSASS memory accessed without a normal dump-file artifact |
+| Task Manager                 | Built-in Windows utility              | `lsass.DMP` written to the user's temporary directory     |
+| Procdump                     | Signed Microsoft Sysinternals utility | `lsass.dmp` written to disk                               |
 
-Before touching Splunk it helped me place these correctly. Looking at the Credential Access tactic page on ATT&CK, there are 17 techniques under it. My three methods all land on the same one, and the same sub-technique within it.
+---
 
-- **Tactic (why):** Credential Access, TA0006
-- **Technique (what):** T1003, OS Credential Dumping
-- **Sub-technique (which surface):** T1003.001, LSASS Memory
-- **Procedure (which tool):** Mimikatz / Task Manager / Procdump
+## Telemetry Sources
 
-The thing that clicked for me is that these are not three techniques. They are three procedures for one sub-technique. That distinction is the whole point of the detection: the tools differ, but the behavior they must all perform is the same, and that is where I want my rule to sit.
+Two Sysmon event types provided the relevant visibility.
 
-## Telemetry
+| Event                      | Important fields                                                                                 | Purpose                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| Event ID 10: ProcessAccess | `SourceImage`, `TargetImage`, `GrantedAccess`, `SourceProcessId`, `TargetProcessId`, `CallTrace` | Records one process opening a handle to another process |
+| Event ID 11: FileCreate    | `Image`, `TargetFilename`, `ProcessGuid`, `ProcessId`                                            | Records a process creating a file                       |
 
-Two Sysmon event types carry the story:
+The two event types cover different parts of the behavior.
 
-| Source | Event ID / Type | Key fields | Why it matters |
-|---|---|---|---|
-| Sysmon | EID 10 ProcessAccess | `SourceImage`, `TargetImage`, `GrantedAccess` | Logs one process opening a handle to another. `TargetImage` is lsass; `GrantedAccess` says what rights the handle carries |
-| Sysmon | EID 11 FileCreate | `Image`, `TargetFilename` | Logs the dump file being written. Catches the tools that leave a `.dmp` behind |
+ProcessAccess can reveal which program accessed LSASS and which rights it requested. FileCreate can reveal a dump written to disk.
 
-The single most important field is `GrantedAccess` on the EID 10 event. Opening a handle to LSASS is not rare on its own. Plenty of legitimate processes do it with low-privilege rights. What separates a credential dump is that the handle carries the memory-read right, `PROCESS_VM_READ` (`0x0010`). That one bit is the behavioral invariant across all three of my procedures.
+Neither source provided complete coverage by itself in my testing.
 
-**Gap I found:** Task Manager did not generate an EID 10 ProcessAccess event at all in my data. Its dump was only visible as an EID 11 FileCreate. So a detection built purely on ProcessAccess would have missed one of my three procedures entirely. That gap is what drives the combined query below and is the strongest argument for watching both event types.
+---
 
-## Detection
+## Stage 1: Find Processes Accessing LSASS
 
-I built this up in stages rather than jumping to the final query, because each stage taught me something about the data.
+I started by searching for Sysmon ProcessAccess events targeting `lsass.exe`:
 
-**Stage 1: who is touching LSASS at all.**
-
-```spl
+```spl id="llfcik"
 index=sysmon
 | where EventCode = 10
-| where TargetImage = "C:\WINDOWS\system32\lsass.exe"
+| where lower(TargetImage) = "c:\\windows\\system32\\lsass.exe"
 | table TargetImage
 ```
 
 ![](images/firstlsasssearch1.png)
 
-This returns events but tells me nothing useful, every row just says lsass. I need to see the accessing process.
+This confirmed that ProcessAccess events existed, but displaying only `TargetImage` did not identify the processes responsible.
 
-**Stage 2: group by the accessing process.**
+---
 
-```spl
+## Stage 2: Group by the Accessing Process
+
+I added `SourceImage` and grouped the results:
+
+```spl id="w1gg09"
 index=sysmon
 | where EventCode = 10
-| where TargetImage = "C:\WINDOWS\system32\lsass.exe"
-| stats count(SourceImage) as AccessCount, values(TargetImage) as TargetImage by SourceImage
+| where lower(TargetImage) = "c:\\windows\\system32\\lsass.exe"
+| stats count as AccessCount,
+        values(TargetImage) as TargetImage
+        by SourceImage
 ```
 
 ![](images/lsasssearch2.png)
 
-Now I can see the actors. Alongside my dumpers there are legitimate accessors: `csrss.exe` and `wininit.exe`, which touch LSASS as part of normal Windows operation. Those are my baseline noise.
+This exposed both expected Windows processes and the processes associated with my dumping procedures.
 
-**Stage 3: subtract the known-good.**
+Normal processes such as `csrss.exe` and `wininit.exe` also accessed LSASS, so targeting LSASS alone was not sufficient to distinguish malicious from legitimate activity.
 
-```spl
+---
+
+## Stage 3: Remove Known Lab Noise
+
+I removed two common accessors observed in my lab:
+
+```spl id="pnt51x"
 index=sysmon
 | where EventCode = 10
-| where TargetImage = "C:\WINDOWS\system32\lsass.exe"
-| where SourceImage != "C:\WINDOWS\system32\csrss.exe" and SourceImage != "C:\WINDOWS\system32\wininit.exe"
-| stats count(SourceImage) as AccessCount, values(TargetImage) as TargetImage by SourceImage
+| where lower(TargetImage) = "c:\\windows\\system32\\lsass.exe"
+| where lower(SourceImage) != "c:\\windows\\system32\\csrss.exe"
+    AND lower(SourceImage) != "c:\\windows\\system32\\wininit.exe"
+| stats count as AccessCount,
+        values(TargetImage) as TargetImage
+        by SourceImage
 ```
 
 ![](images/lsasssearch3.png)
 
-With csrss and wininit removed, `procdump.exe`, `procdump64.exe`, and `powershell.exe` (my Meterpreter host) are left standing. This is the baseline-then-subtract pattern: I do not search for the bad thing by name, I remove everything that is supposed to touch LSASS and see what remains.
+After removing those processes, the remaining results included:
 
-**Stage 4: catch the file-write procedures too.**
+* `procdump.exe`
+* `procdump64.exe`
+* `powershell.exe`, associated with the Meterpreter procedure
 
-Stage 3 still misses Task Manager, because Task Manager never produced a ProcessAccess event. To catch it I have to also look at the FileCreate events for a dump file. Because the two event types name the actor field differently (EID 10 uses `SourceImage`, EID 11 uses `Image`), I normalize them into one field with `coalesce`.
+This demonstrated the value of baselining, but it did not yet provide complete coverage.
 
-```spl
-index=sysmon
-| where EventCode = 10 OR EventCode = 11
-| where TargetImage = "C:\WINDOWS\system32\lsass.exe" OR TargetFilename like "%lsass%"
-| eval Image = coalesce(SourceImage, Image)
-| where Image != "C:\WINDOWS\system32\csrss.exe" and Image != "C:\WINDOWS\system32\wininit.exe"
-| fillnull value="-"
-| stats values(TargetImage) as TargetImage, values(TargetFilename) as TargetFilename, values(EventDescription) as EventDescription by Image
+Task Manager was still absent.
+
+---
+
+## The Task Manager Visibility Gap
+
+In my collected data, Task Manager did not generate a Sysmon Event ID 10 showing it accessing LSASS.
+
+That does not prove that Task Manager performed no process access at the operating-system level. It means that I did not observe the corresponding ProcessAccess event with my deployed Sysmon configuration and collected telemetry.
+
+The dump was still visible through Event ID 11 because Task Manager created:
+
+```text id="9iwhc3"
+C:\Users\ADMINI~1\AppData\Local\Temp\lsass.DMP
 ```
 
-**Logic walkthrough:**
-- `EventCode = 10 OR 11` — grab both handle-opens and file-writes
-- `TargetImage = lsass OR TargetFilename like "%lsass%"` — the first clause scopes the ProcessAccess events to LSASS, the second scopes the FileCreate events to any dump file with lsass in the name
-- `eval Image = coalesce(SourceImage, Image)` — unify the actor field so both event types share one column
-- exclude csrss and wininit — same baseline subtraction as before
-- `stats ... by Image` — one row per actor, showing whether it opened a handle, wrote a file, or both
+A detection based only on Event ID 10 would therefore have missed one of my three tested procedures.
+
+---
+
+## Stage 4: Combine ProcessAccess and FileCreate
+
+The course exercise combined the ProcessAccess and FileCreate events with this query:
+
+```spl id="2s73wa"
+index=sysmon
+| where EventCode = 10 OR EventCode = 11
+| where TargetImage = "C:\WINDOWS\system32\lsass.exe"
+    OR TargetFilename like "%lsass%"
+| eval Image = coalesce(SourceImage, Image)
+| where Image != "C:\WINDOWS\system32\csrss.exe"
+    AND Image != "C:\WINDOWS\system32\wininit.exe"
+| fillnull value="-"
+| stats values(TargetImage) as TargetImage,
+        values(TargetFilename) as TargetFilename,
+        values(EventDescription) as EventDescription
+        by Image
+```
+
+The query normalizes the actor fields because:
+
+* Event ID 10 identifies the accessing process with `SourceImage`
+* Event ID 11 identifies the file-creating process with `Image`
 
 ![](images/lsasssearch4.png)
 
-Now `taskmgr.exe` appears, caught by its FileCreate to `C:\Users\ADMINI~1\AppData\Local\Temp\lsass.DMP`. The combined query surfaces all three procedures: procdump (both paths), the Meterpreter PowerShell, and Task Manager. Task Manager was invisible to ProcessAccess and only the FileCreate branch caught it.
+This produced visibility into all three procedures:
 
-**Stage 5: read the access rights.**
+* Procdump appeared through ProcessAccess and FileCreate
+* The Meterpreter-associated PowerShell process appeared through ProcessAccess
+* Task Manager appeared through FileCreate
 
-Knowing who touched LSASS is not the same as knowing what they did to it. That is what `GrantedAccess` tells me.
+This query was useful for validating the lab behavior, but it is broad.
 
-```spl
+The condition:
+
+```spl id="u6rvja"
+TargetFilename like "%lsass%"
+```
+
+can also match benign files whose paths happen to contain the string `lsass`.
+
+I observed this with Windows Update activity under the WinSxS directory.
+
+---
+
+## Understanding GrantedAccess
+
+The `GrantedAccess` field in Event ID 10 is a hexadecimal bitmask representing the rights requested for the target process.
+
+I examined the access masks with:
+
+```spl id="rj5muw"
 index=sysmon
 | where EventCode = 10
-| where SourceImage != "C:\WINDOWS\system32\csrss.exe" and SourceImage != "C:\WINDOWS\system32\wininit.exe"
-| where TargetImage = "C:\WINDOWS\system32\lsass.exe"
-| stats count(SourceImage) as ImageCount, values(TargetImage) as TargetImage, values(GrantedAccess) as GrantedAccess by SourceImage
+| where lower(TargetImage) = "c:\\windows\\system32\\lsass.exe"
+| where lower(SourceImage) != "c:\\windows\\system32\\csrss.exe"
+    AND lower(SourceImage) != "c:\\windows\\system32\\wininit.exe"
+| stats count as ImageCount,
+        values(TargetImage) as TargetImage,
+        values(GrantedAccess) as GrantedAccess
+        by SourceImage
 ```
 
 ![](images/grantedaccesssearch.png)
 
-The `GrantedAccess` values are access-rights bitmasks. Reading them:
+My data included:
 
-| SourceImage | GrantedAccess | Meaning |
-|---|---|---|
-| `SysWOW64\procdump64.exe` | `0x1fffff` | full access (PROCESS_ALL_ACCESS) |
-| `system32\procdump.exe` | `0x1fffff` | full access |
-| `WindowsPowerShell\v1.0\powershell.exe` (Meterpreter) | `0x1410` | VM_READ + query information |
-| `system32\winlogon.exe` | `0x1010` | VM_READ + query limited info |
+| Source process                          | GrantedAccess | Relevant interpretation                               |
+| --------------------------------------- | ------------: | ----------------------------------------------------- |
+| `SysWOW64\procdump64.exe`               |    `0x1fffff` | Broad process access including memory-read rights     |
+| `System32\procdump.exe`                 |    `0x1fffff` | Broad process access including memory-read rights     |
+| `WindowsPowerShell\v1.0\powershell.exe` |      `0x1410` | Includes process memory-read and query rights         |
+| `System32\winlogon.exe`                 |      `0x1010` | Includes process memory-read and limited-query rights |
 
-To decode these I used the `Get-SysmonAccessMask` function from the PSGumshoe module, which maps a mask to its individual rights. The Sysmon Community Guide has the reference table of what each bit means.
+I used the `Get-SysmonAccessMask` function from PSGumshoe to decode the masks.
 
 ![](images/accessmask.png)
 
@@ -210,87 +361,318 @@ Decoding `0x1010`:
 
 ![](images/psgscript2.png)
 
-Putting the decodes together:
-- `0x1fffff` = every process right, including VM_READ, VM_WRITE, CREATE_THREAD. This is a tool grabbing total control of LSASS, and nothing legitimate needs all-access to it. Both Procdump instances requested this.
-- `0x1410` = VM_READ + QUERY_INFORMATION + QUERY_LIMITED_INFORMATION. This is the Meterpreter-driven PowerShell reading memory with a narrower footprint than Procdump.
-- `0x1010` = VM_READ + QUERY_LIMITED_INFORMATION. This one is `winlogon.exe`, a legitimate system process. It contains VM_READ but it is not an attack.
+One important access right present in the observed masks was:
 
-**Hypothesis:** a process opening a handle to `lsass.exe` with a `GrantedAccess` mask that includes `PROCESS_VM_READ` (`0x0010`), and that is not a known legitimate accessor, is reading LSASS memory. The exact mask varies by tool, but the VM_READ bit is the invariant.
+```text id="637bqe"
+PROCESS_VM_READ = 0x0010
+```
 
-That last row is the important lesson. My first instinct was to tier by total access and treat the high mask as malicious and the low mask as safe. But `0x1010` (winlogon, benign) and `0x1410` (Meterpreter, malicious) both contain VM_READ, and they differ by a single bit. So the mask alone cannot cleanly separate good from bad. The real trigger is the VM_READ bit plus the actor not being on my known-good list, not the size of the mask.
+That right permits a process to read memory from another process.
 
-**Stage 6: flag by mask for triage priority.**
+However, its presence is not proof of malicious activity. The legitimate `winlogon.exe` process in my lab also accessed LSASS with a mask containing `PROCESS_VM_READ`.
 
-Even though the mask does not decide malicious-versus-benign on its own, it is still useful for triage priority. A full-access handle to LSASS deserves attention before a narrow one.
+Similarly, `Sysmon.exe` appeared with broad access to LSASS in my results.
 
-```spl
+This means neither a high total mask nor the VM_READ bit can be treated as a perfect malicious fingerprint.
+
+They must be evaluated together with:
+
+* The source process
+* Its expected behavior
+* Its path and signature
+* Its parent process
+* The user and integrity level
+* The surrounding endpoint activity
+* The environment's baseline
+
+---
+
+## Testing Exact Masks
+
+I also used the exact masks observed in the lab as a triage experiment:
+
+```spl id="981i20"
 index=sysmon
 | where EventCode = 10
-| where SourceImage != "C:\WINDOWS\system32\csrss.exe" and SourceImage != "C:\WINDOWS\system32\wininit.exe"
-| where TargetImage = "C:\WINDOWS\system32\lsass.exe"
-| eval FullProcessAccess = if(GrantedAccess = "0x1fffff", 1, 0)
-| eval LimitedProcessAccess = if(GrantedAccess = "0x1410", 1, 0)
+| where lower(TargetImage) = "c:\\windows\\system32\\lsass.exe"
+| where lower(SourceImage) != "c:\\windows\\system32\\csrss.exe"
+    AND lower(SourceImage) != "c:\\windows\\system32\\wininit.exe"
+| eval FullProcessAccess=if(GrantedAccess="0x1fffff", 1, 0)
+| eval LimitedProcessAccess=if(GrantedAccess="0x1410", 1, 0)
 | where FullProcessAccess = 1
-| stats count(SourceImage) as ImageCount, values(TargetImage) as TargetImage, values(GrantedAccess) as GrantedAccess by SourceImage
+| stats count as ImageCount,
+        values(TargetImage) as TargetImage,
+        values(GrantedAccess) as GrantedAccess
+        by SourceImage
 ```
 
 ![](images/lsasssearch5.png)
 
-This surfaces the full-access accessors, which in my data are both Procdump instances plus `Sysmon.exe` itself, since Sysmon legitimately opens LSASS with full access. That is a useful reminder that a high mask is not automatically malicious, Sysmon sits right there at `0x1fffff` alongside the dumpers. Flipping the filter to `LimitedProcessAccess = 1` surfaces the Meterpreter PowerShell instead. I would not ship this as the alert itself, because filtering to exact masks would blind me to any tool that requests a slightly different rights combination. It is a triage lens, not the detection.
+This surfaced the Procdump processes, but it also surfaced `Sysmon.exe`.
 
-## False positives & tuning
+Changing the filter to `LimitedProcessAccess = 1` surfaced the Meterpreter-associated PowerShell process.
 
-- **Likely FP source:** legitimate system processes hold VM_READ handles to LSASS. In my own data `winlogon.exe` (`0x1010`) did exactly that, and `csrss.exe` and `wininit.exe` access LSASS constantly. My baseline also caught `wuauclt` / `wuacltcore.exe` (Windows Update) writing a file whose path contained the string `lsass` under WinSxS, which my `%lsass%` wildcard matched even though it was not a dump.
-- **Tuning approach:** maintain an allowlist of known-good accessors (csrss, wininit, winlogon, and whatever EDR or backup agent legitimately opens LSASS in the environment), and tighten the FileCreate branch so `%lsass%` does not match servicing files under WinSxS. The VM_READ bit stays as the trigger; the allowlist is what keeps it quiet.
-- **Tradeoff accepted:** the `%lsass%` wildcard is deliberately loose so it catches oddly named dump files, at the cost of matching benign files with lsass in the path (like the Windows Update file-write above). I would rather review a few Windows Update file-writes than miss a dump named to look innocent. The allowlist is specific to this lab; a production baseline would need to be built from that environment's own normal.
+This was useful for examining my data, but an operational detection should not depend only on exact masks such as `0x1fffff` or `0x1410`.
+
+Another dumping procedure may request a different combination of rights while still including the ability to read process memory.
+
+---
+
+## Detection Hypothesis
+
+My final hypothesis contains two complementary branches.
+
+### ProcessAccess branch
+
+A process opens a handle to `lsass.exe` with a `GrantedAccess` mask containing `PROCESS_VM_READ`, and the process is not an expected accessor in the environment.
+
+### Dump-file branch
+
+A process creates a file whose name and extension are consistent with an LSASS memory dump.
+
+The two branches cover different telemetry paths:
+
+* ProcessAccess can identify memory-access procedures that do not write a dump file.
+* FileCreate can identify disk-backed procedures that may not appear in the collected ProcessAccess telemetry.
+
+---
+
+## Generalized Lab Detection
+
+The following query expresses both branches while testing the VM_READ bit rather than relying on one exact access mask:
+
+```spl id="c6b4ua"
+index=sysmon (EventCode=10 OR EventCode=11)
+| eval ActorImage=coalesce(SourceImage, Image)
+| eval ActorImageLower=lower(ActorImage)
+| eval TargetImageLower=lower(TargetImage)
+| eval TargetFilenameLower=lower(TargetFilename)
+| eval GrantedAccessDecimal=if(
+    EventCode=10,
+    tonumber(replace(lower(GrantedAccess), "0x", ""), 16),
+    null()
+)
+| eval HasProcessVmRead=if(
+    EventCode=10 AND bit_and(GrantedAccessDecimal, 16)=16,
+    1,
+    0
+)
+| eval DetectionBranch=case(
+    EventCode=10
+        AND TargetImageLower="c:\\windows\\system32\\lsass.exe"
+        AND HasProcessVmRead=1,
+        "LSASS ProcessAccess with VM_READ",
+    EventCode=11
+        AND match(TargetFilenameLower, "(^|\\\\)lsass[^\\\\]*\\.(dmp|dump)$"),
+        "LSASS dump-file creation"
+)
+| where isnotnull(DetectionBranch)
+| where ActorImageLower!="c:\\windows\\system32\\csrss.exe"
+    AND ActorImageLower!="c:\\windows\\system32\\wininit.exe"
+    AND ActorImageLower!="c:\\windows\\system32\\winlogon.exe"
+| fillnull value="-"
+| table _time,
+        host,
+        DetectionBranch,
+        ActorImage,
+        TargetImage,
+        TargetFilename,
+        GrantedAccess,
+        SourceProcessId,
+        TargetProcessId,
+        User
+```
+
+The query converts the hexadecimal `GrantedAccess` value to a number and performs a bitwise comparison against decimal `16`, which represents `0x0010` or `PROCESS_VM_READ`.
+
+Splunk supports `tonumber` for base conversion and `bit_and` for evaluating individual bits in a numeric mask.
+
+The allowlist is based only on processes observed in my lab. It would need to be rebuilt and reviewed for another environment.
+
+---
+
+## What the Query Detects
+
+The ProcessAccess branch can identify events such as:
+
+* Procdump opening LSASS with broad process rights
+* The Meterpreter-associated PowerShell process opening LSASS with memory-read rights
+* Other unexpected programs requesting a mask that contains VM_READ
+
+The FileCreate branch can identify filenames such as:
+
+```text id="pixcwa"
+lsass.DMP
+lsass.dmp
+lsass-memory.dump
+```
+
+The file condition is narrower than searching for `%lsass%` anywhere in the complete path, reducing matches from benign Windows servicing paths.
+
+It is still not complete coverage because an attacker-controlled utility such as Procdump can save the dump under an unrelated filename.
+
+---
+
+## Why Two Branches Are Necessary
+
+No single telemetry source caught all three procedures in my lab.
+
+| Procedure                    |    ProcessAccess EID 10 | FileCreate EID 11 |
+| ---------------------------- | ----------------------: | ----------------: |
+| Mimikatz through Meterpreter |                Observed |      Not observed |
+| Task Manager dump            | Not observed in my data |          Observed |
+| Procdump                     |                Observed |          Observed |
+
+The testing therefore did not prove that one ProcessAccess rule catches every LSASS-dumping method.
+
+It demonstrated that combining memory-access telemetry with dump-file creation provides broader coverage than either source alone.
+
+That is the central lesson from the exercise.
+
+---
+
+## False Positives and Tuning
+
+### Legitimate LSASS access
+
+Windows components and security products may legitimately access LSASS.
+
+Processes observed in my lab included:
+
+* `csrss.exe`
+* `wininit.exe`
+* `winlogon.exe`
+* `Sysmon.exe`
+
+A production environment may also contain:
+
+* Endpoint detection and response agents
+* Antivirus software
+* Credential providers
+* Backup software
+* Authentication products
+* Identity security tools
+
+The expected processes must be baselined for the environment.
+
+### Broad allowlists
+
+A process name alone is not a sufficient allowlist condition.
+
+For example, malware could masquerade under a familiar filename or execute from an unexpected path.
+
+A stronger allowlist may consider:
+
+* Complete executable path
+* Digital signature
+* File hash or signer
+* Parent process
+* Service name
+* User context
+* Host role
+* Expected access mask
+* Normal frequency
+
+### FileCreate noise
+
+A broad search for paths containing `lsass` matched benign Windows Update activity under WinSxS.
+
+Restricting the search to filenames resembling LSASS dump files reduces that noise, but it also creates a blind spot for dumps saved under unrelated names.
+
+### Security tooling
+
+`Sysmon.exe` appeared with broad access to LSASS in my data.
+
+This proves that even `0x1fffff` is not automatically malicious.
+
+The access mask affects triage priority, but context determines whether the activity is expected.
+
+---
 
 ## Limitations
 
-The clearest limitation showed up in my own testing: no single event type caught all three methods.
+### Task Manager ProcessAccess was not visible
 
-- The **ProcessAccess** branch (EID 10) never saw Task Manager, because Task Manager did not generate a ProcessAccess event in my data. It was only visible as a FileCreate.
-- The **FileCreate** branch (EID 11) never saw the Mimikatz-in-memory dump, because that method runs in memory and does not write a `.dmp` file to catch.
+I did not observe a ProcessAccess event for Task Manager under my deployed Sysmon configuration.
 
-So each branch on its own has a blind spot, and only watching both together surfaced all three procedures. That is a limitation to be honest about rather than a solved problem.
+The FileCreate branch was required to detect the dump.
 
-## Analyst response
+### In-memory procedures may not create files
 
-If this fired at 2am I would:
+The Meterpreter and Mimikatz procedure did not create a normal `.dmp` artifact.
 
-1. **Validate.** Pull the raw EID 10, confirm `TargetImage` is lsass and `GrantedAccess` includes VM_READ, and check the `SourceImage` against the known-good allowlist.
-2. **Scope.** Pivot on the host and the SourceImage PID. Look for the matching EID 11 dump file and the process that spawned the accessor.
-3. **Contain / escalate.** If it is a real dump, assume every credential used on that host is burned. Isolate the host, force password and Kerberos key resets for accounts that had sessions there, and escalate as a credential-access incident rather than a single-host event.
+A FileCreate-only detection would miss it.
 
-## Key takeaways
+### Dump files can be renamed
 
-This lab taught me more than just how to catch LSASS dumps. Here are the things I'm taking forward:
+An attacker-controlled utility can save LSASS memory under a filename that does not contain `lsass` and may not use `.dmp` or `.dump`.
 
-1. **Behavioral primitives beat tool names.** Mimikatz, Procdump, and Task Manager look nothing alike, different binaries, different parents, different execution styles. But they all have to open a handle to `lsass.exe` with the `PROCESS_VM_READ` bit set. That shared primitive is what actually matters. I'm going to keep asking "what is the one thing every version of this technique has to do?" instead of chasing individual tools.
+The FileCreate branch is therefore useful but incomplete.
 
-2. **One event type is almost never enough.** Task Manager never showed up in ProcessAccess events in my data, only in FileCreate. The in-memory Mimikatz run never wrote a file at all. I had to watch both EID 10 and EID 11 and line them up. That gap surprised me and is something I'll remember every time I build a new detection.
+### Access rights are not unique to attackers
 
-3. **GrantedAccess is powerful but you can't treat it like a perfect fingerprint.** The exact mask varies by tool (`0x1010`, `0x1410`, `0x1fffff`), and even benign processes can sit one bit away from malicious ones. The real signal is the VM_READ bit plus "not on my baseline." I'll use the full mask for triage priority, not as the sole detection logic.
+Legitimate processes can request VM_READ or broad access to LSASS.
 
-4. **Baselining is non-negotiable.** `csrss.exe`, `wininit.exe`, and `winlogon.exe` touch LSASS all the time. Without subtracting the known-good, you drown in noise. Every high-value detection needs its own environment-specific allowlist.
+The bitmask must be interpreted with the source-process context and the environment's baseline.
 
-5. **Understand why the attack works in the first place.** LSASS dumping isn't a bug, it's a consequence of how Windows does single sign-on. Turning off LSA Protection and Defender for the lab made me appreciate what those controls are actually doing. Seeing how easily the dump worked with LSA Protection off made me want to understand the prevention side (things like PPL and Credential Guard) properly next.
+### ProcessAccess visibility depends on configuration
 
-6. **Testing more than one procedure builds real confidence.** Using an in-memory offensive tool, a signed Sysinternals binary, and a built-in Windows feature gave me much higher confidence that the detection held up than any single one would have. I'll try to test a technique more than one way going forward.
+Sysmon only records events permitted by its active configuration.
 
-7. **Document the mess, not just the win.** Writing down the limitations, the false positives I had to tune, and the things that didn't work the first time made the whole exercise more valuable. Being honest about the gaps forces better thinking.
+Collection, filtering, forwarding, parsing, and retention can all create visibility gaps.
 
-A couple of extra things that stuck with me:
-- Clean lab data is great for learning, but real environments are noisy. Expect tuning.
-- Good detections should help the analyst at 2 a.m.: what to check first, what the likely next steps are.
-- Turning labs into writeups compounds the learning. The act of explaining it clearly made me understand it better.
+### Security controls may block the technique
 
-This shifted how I think about detection work. I'm less interested in "catch this specific tool" and more focused on the underlying behavior now.
+Controls such as LSA Protection, Credential Guard, Microsoft Defender, and endpoint security products can block or alter the behavior before the expected telemetry appears.
+
+This lab intentionally weakened some protections to permit testing.
+
+---
+
+## Analyst Investigation
+
+If this detection fired, I would investigate:
+
+1. Which host generated the event?
+2. Which process accessed LSASS or created the file?
+3. Is the executable running from its expected path?
+4. Is it digitally signed, and by whom?
+5. Which process launched it?
+6. Which user and integrity level were associated with it?
+7. Which access rights were requested?
+8. Is the process expected to access LSASS on this host?
+9. Was a dump file created?
+10. What is the dump file's location, size, and hash?
+11. Did the source process make unusual network connections?
+12. Was there earlier privilege escalation or remote execution?
+13. Were LSA Protection or other security controls modified?
+14. Which privileged users had active or recent sessions on the host?
+
+If the activity were confirmed as malicious, I would treat credentials present on the system as potentially exposed and follow the incident-response process for host isolation, credential scoping, credential rotation, and lateral-movement investigation.
+
+---
+
+## Key Takeaways
+
+* Mimikatz, Task Manager, and Procdump are three procedures for the same ATT&CK sub-technique.
+* The procedures did not produce identical telemetry in my lab.
+* Sysmon ProcessAccess events provided visibility into Mimikatz and Procdump.
+* Sysmon FileCreate events provided the only visibility I observed for the Task Manager dump.
+* Covering all three required two complementary detection branches.
+* The `PROCESS_VM_READ` bit is an important memory-access signal, but legitimate processes may also request it.
+* Exact masks such as `0x1fffff` and `0x1410` are useful for understanding the data but should not be treated as universal signatures.
+* A broad `%lsass%` filename search creates avoidable Windows servicing noise.
+* Allowlisting must be specific to the environment and should use more context than the process name alone.
+* Testing multiple procedures exposed a visibility gap that a single-tool test would not have revealed.
+* The most valuable result was not proving that one rule catches everything. It was learning where each telemetry source succeeds and fails.
 
 ---
 
 ## References
-- MITRE ATT&CK: [T1003.001 OS Credential Dumping: LSASS Memory](https://attack.mitre.org/techniques/T1003/001/)
-- [TrustedSec Sysmon Community Guide, Process Access](https://github.com/trustedsec/SysmonCommunityGuide)
-- [PSGumshoe Get-SysmonAccessMask](https://github.com/PSGumshoe/PSGumshoe)
-- [Threat Hunter Playbook, LSASS Memory Read Access](https://threathunterplaybook.com/hunts/windows/170105-LSASSMemoryReadAccess/notebook.html)
-- [Red Canary Threat Detection Report, LSASS Memory](https://redcanary.com/threat-detection-report/techniques/lsass-memory/)
+
+* [MITRE ATT&CK – T1003.001: LSASS Memory](https://attack.mitre.org/techniques/T1003/001/)
+* [Microsoft Sysinternals – Sysmon](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon)
+* [TrustedSec – Sysmon Community Guide: Process Access](https://github.com/trustedsec/SysmonCommunityGuide)
+* [PSGumshoe – Get-SysmonAccessMask](https://github.com/PSGumshoe/PSGumshoe)
+* [Threat Hunter Playbook – LSASS Memory Read Access](https://threathunterplaybook.com/hunts/windows/170105-LSASSMemoryReadAccess/notebook.html)
+* [Red Canary – LSASS Memory](https://redcanary.com/threat-detection-report/techniques/lsass-memory/)
