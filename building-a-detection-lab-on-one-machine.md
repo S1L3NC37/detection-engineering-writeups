@@ -161,8 +161,16 @@ A lot of the learning here was troubleshooting. A few lessons that generalize pa
 
 The one method that kept working: when a tool fails, reproduce what it's doing by hand, one layer at a time. If every manual step succeeds, the fault is in the tool, not the environment. And in a screen full of errors, read the first one, because the rest are usually downstream of it.
 
-## Where this goes next
+## Detection Work Built on This Lab
 
-The lab is the foundation, but the detections are the point. I've started turning this telemetry into actual detections, beginning on Windows with a reverse shell caught two different ways and then combined into a single query. Those writeups are coming, and from there I'm working across all the sources I've wired up, correlating between them, and feeding the one index I haven't fed yet (event tracing for Windows).
+The lab is the foundation, but the detections are the point. I have used its telemetry to investigate and document:
 
-Live sources right now: Windows logs, Sysmon, Linux audit, Kubernetes, AWS, and Azure identity. Still to come: ETW.
+* A Windows reverse shell detected through process relationships and abnormal command-line length
+* LSASS credential dumping performed through Mimikatz, Task Manager, and Procdump
+* Credential and share discovery activity generated with Snaffler
+* Kerberoasting activity observed through Windows and network telemetry
+
+These exercises use the same environment described in this article. The Windows and Active Directory investigations rely on Splunk, Sysmon, and Windows Security events, while Malcolm provides an independent network perspective where the relevant traffic is visible.
+
+The lab currently collects Windows event logs, Sysmon, Linux audit data, Kubernetes audit logs, AWS CloudTrail records, and Entra ID logs. The `etw` index has been created but is not yet populated.
+
