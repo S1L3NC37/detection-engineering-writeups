@@ -123,7 +123,7 @@ That collapsed thousands of events down to a handful, and my malicious `powershe
 
 ## 5. Detection 2: a command line that is way too long
 
-The second angle ignores lineage entirely and looks at size. That giant base64 blob in the parent command line is not an accident of this one payload, it is inherent to how encoded PowerShell payloads work. They have to carry the encoded shellcode as text, and that text is long. Normal commands are short. So command line length by itself is a signal.
+The second detection angle ignores process lineage and examines command-line length. The `msfvenom` payload I executed placed a large encoded and compressed blob inside the PowerShell command, making its parent command line much longer than most of the activity I observed in my lab. That gave me a measurable signal to investigate, although command-line length alone is not malicious and some legitimate software also generates long commands.
 
 I started by measuring the length of every command line and its parent, then sorting so the longest floated to the top:
 
