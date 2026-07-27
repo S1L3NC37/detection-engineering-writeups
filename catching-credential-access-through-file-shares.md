@@ -216,11 +216,13 @@ index=winlogs EventCode=5145
 
 ## False positives and tuning
 
-That threshold of 14 is a real detection decision, not a throwaway number, so it's worth being honest about the tradeoff.
+The threshold of 14 is specific to this controlled exercise. I created 15 test shares, denied `lowpriv` access to them, and then ran Snaffler as that account. The resulting burst of Event ID 5145 failures caused the query to cross the threshold.
 
-The most likely thing to trip this without being an attack is legitimate infrastructure that touches lots of shares: backup agents, file indexing or DLP tools, vulnerability scanners, or a migration script. All of those can rack up wide share access, and some rack up failures too when permissions are inconsistent. A brand new employee whose group memberships aren't fully sorted can also throw a burst of access-denied events across shares they should reach but can't yet.
+The query uses `count(ShareName)`, so it counts failed access-check events in which `ShareName` is present. It does not calculate the number of unique shares. In this lab run, the failures were generated while Snaffler attempted to crawl the batch of test shares I had created.
 
-The tuning I'm choosing here is the failure-count threshold: only alert when one account fails against more shares than a real user plausibly would in normal work. Setting it above 14 means a person hitting one or two shares they lost access to won't fire it, but a tool sweeping the estate will. The tradeoff I'm accepting is coverage at the low end. If an attacker is careful and only scans a handful of shares, or only ones their account can actually read (so no failures at all), this particular query won't catch them. I'd pair it with the breadth-based hunt (one IP against many distinct shares) and, in a real environment, allowlist known service accounts like the backup agent so their normal wide access doesn't drown the alert. The honest summary is that failure-volume is a strong signal against noisy tools like Snaffler run out of the box, and a weaker one against a patient attacker, which is why it's one detection and not the only one.
+Legitimate infrastructure can also generate large numbers of failed share-access events. Examples include backup agents, file-indexing tools, vulnerability scanners, migration scripts, and accounts affected by inconsistent permissions.
+
+The detection worked against the noisy Snaffler execution I tested. A user or tool producing fewer failures, spreading the activity out, or accessing shares successfully would not trigger this query.
 
 ## The network layer
 
