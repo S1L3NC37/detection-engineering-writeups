@@ -12,13 +12,11 @@
 
 ## TL;DR
 
-I used Impacket's `GetUserSPNs.py` to request Kerberos service tickets for eight accounts with Service Principal Names configured in my Active Directory lab.
+I created eight Active Directory accounts with Service Principal Names and used Impacket's `GetUserSPNs.py` to request Kerberos service tickets for them.
 
-The course example produced RC4-encrypted tickets, but my environment continued returning AES256 tickets. Rather than changing the environment simply to reproduce the course's result, I adapted the detection to the telemetry my domain actually generated.
+The course example produced RC4 tickets, but my environment returned AES256. Kerberoasting does not require RC4, so I continued with the telemetry my domain actually generated rather than trying to force the result to match the example.
 
-The useful behavioral signal in my lab was one account requesting tickets for many distinct services within a short period. I observed that activity in Windows Security Event ID 4769, corroborated it through Malcolm's network telemetry, and cracked one captured AES256 service ticket to recover the weak password protecting the account.
-
-For this exercise, I authenticated to `GetUserSPNs.py` using the domain Administrator account. The exercise demonstrates the ticket-requesting, detection, network-correlation, and offline-cracking workflow, but it does not reproduce the complete attack path from a compromised low-privileged account.
+I detected the activity in Splunk as one account requesting tickets for eight distinct services within a short period. I then corroborated the same one-to-many pattern through Malcolm's network telemetry and cracked one captured AES256 ticket to recover the weak password protecting the service account.
 
 ---
 
@@ -26,19 +24,27 @@ For this exercise, I authenticated to `GetUserSPNs.py` using the domain Administ
 
 Kerberoasting takes advantage of a normal Kerberos function.
 
-A domain user can request a service ticket for an account that has a Service Principal Name, or SPN. Part of that ticket is encrypted using a key derived from the service account's password.
+An authenticated domain user can request a service ticket for an account that has a Service Principal Name, or SPN. Part of the returned ticket is encrypted using a key derived from the service account's password.
 
-An attacker can take the ticket off the network and attempt to crack it offline. The attacker does not need to repeatedly communicate with the domain controller while guessing the password, so the cracking activity itself does not create additional authentication failures in the domain.
+An attacker can save that ticket and test password guesses against it offline. The cracking process does not require additional communication with the domain controller and does not generate repeated failed logons.
 
-If the service account has a weak password, the attacker may recover it and gain whatever access that account possesses.
+If the service account uses a weak password, the attacker may recover it and gain whatever permissions belong to that account.
 
-A real Kerberoasting attack can begin from a low-privileged domain account. In this lab, however, the objective was to generate and analyze representative telemetry rather than reproduce a complete privilege-escalation path.
+My goal was not only to execute the technique. I wanted to understand:
+
+* What it produces in the domain controller's event logs
+* What it looks like in network telemetry
+* Which parts of the activity distinguish it from normal Kerberos authentication
+* How the encryption type affects detection and cracking
+* How to turn the observed behavior into a usable Splunk search
+
+MITRE ATT&CK documents the technique as [T1558.003 – Kerberoasting](https://attack.mitre.org/techniques/T1558/003/).
 
 ---
 
-## Lab Setup
+## Setting Up the Lab
 
-I used three virtual machines for this exercise:
+I used three virtual machines for the exercise:
 
 | Host      | Role                                                       |
 | --------- | ---------------------------------------------------------- |
@@ -46,11 +52,15 @@ I used three virtual machines for this exercise:
 | `LinuxA`  | Attacker system running Impacket and Hashcat               |
 | `Malcolm` | Network traffic collection and analysis                    |
 
-To create accounts that could be Kerberoasted, I ran the course-provided PowerShell script on the domain controller. The script created eight Active Directory users and assigned SPNs to them.
+To create Kerberoastable targets, I ran the course-provided PowerShell script on the domain controller.
+
+The script created an Active Directory organizational unit and eight users with SPNs assigned to them.
 
 ![](images/01-spn-accounts-created.png)
 
-These were disposable lab accounts created specifically for the exercise. They did not represent real production service accounts or an actual privilege path.
+These were disposable lab accounts created specifically to generate representative Kerberoasting telemetry. Their passwords were already known, and the accounts did not represent a real privilege-escalation path.
+
+That distinction matters: the purpose of the exercise was to reproduce the observable ticket-requesting behavior, not to claim that I discovered unknown credentials in the environment.
 
 ---
 
@@ -68,14 +78,14 @@ I then ran:
 GetUserSPNs.py condef.local/Administrator -dc-ip 192.168.137.135 -request -outputfile kerbtickets.txt
 ```
 
-The command:
+This command:
 
-* Authenticated to the domain as `Administrator`
+* Authenticated to `condef.local` as `Administrator`
 * Located accounts with SPNs
 * Requested service tickets for those accounts
 * Saved the returned TGS-REP hash material to `kerbtickets.txt`
 
-I examined the resulting file with:
+I examined the output with:
 
 ```bash
 cat kerbtickets.txt
@@ -83,11 +93,11 @@ cat kerbtickets.txt
 
 ![](images/03-captured-hashes.png)
 
-The output contained crackable service-ticket material for the accounts with SPNs.
+The file contained service-ticket material that could be tested offline with a password-cracking tool.
 
-These are not the service accounts' stored NTLM password hashes. They are representations of the encrypted Kerberos service tickets that password-cracking tools can test offline.
+These are not copies of the accounts' stored password hashes. They are crackable representations of the encrypted Kerberos service tickets.
 
-Before attempting to crack one, I investigated what the ticket requests produced in my host and network telemetry.
+I used the Administrator account because that is how the course generated the telemetry for this exercise. Kerberoasting can be performed from a low-privileged domain account, but this specific execution was designed to reproduce the ticket-requesting, detection, and cracking workflow rather than the complete attack path.
 
 ---
 
@@ -98,7 +108,8 @@ When an account requests a Kerberos service ticket, the domain controller record
 My first query counted how many distinct services each account requested tickets for:
 
 ```spl
-index=winlogs EventCode=4769
+index=winlogs
+| where EventCode = 4769
 | stats dc(ServiceName) as TicketRequestedCount,
         values(ServiceName) as ServicesRequested
         by TargetUserName
@@ -112,11 +123,11 @@ This gave me:
 * The number of distinct services requested
 * The names of those services
 
-The query is useful for initial investigation, but it is not yet a complete detection. It counts events across the entire selected Splunk time range and does not establish how quickly the requests occurred.
+Event ID 4769 is generated during normal Kerberos authentication, so the presence of one event is not suspicious by itself.
 
-The behavior I wanted to detect was not simply that a service ticket was requested. Service-ticket requests are normal Kerberos activity.
+The pattern that stood out in my lab was one account requesting tickets for eight different services within a short period.
 
-The suspicious pattern was one account requesting tickets for many different services within a short period.
+That one-to-many request pattern became the primary behavioral signal for the detection.
 
 ---
 
@@ -126,18 +137,17 @@ Event ID 4769 also contains the `TicketEncryptionType` field.
 
 ![](images/05-ticket-encryption-type.png)
 
-Microsoft documents the values used in this field:
+Microsoft documents the field in its [Event 4769 reference](https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4769).
 
-https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4769
+Encryption type matters because RC4 tickets are faster to test with password-cracking tools than AES tickets. Kerberoasting tools and operators may therefore attempt to obtain RC4 tickets when the environment allows it.
 
-Encryption type can provide useful context during a Kerberoasting investigation. RC4-encrypted tickets are particularly important because they are substantially faster to test with password-cracking tools than AES tickets.
+RC4 is not required for Kerberoasting, however. AES service tickets can also be captured and cracked offline.
 
-However, RC4 is not required for Kerberoasting. AES-encrypted service tickets can also be taken offline and cracked.
-
-I added the encryption type to my query:
+I added `TicketEncryptionType` to the query to determine what my execution produced:
 
 ```spl
-index=winlogs EventCode=4769
+index=winlogs
+| where EventCode = 4769
 | stats dc(ServiceName) as TicketRequestedCount,
         values(ServiceName) as ServicesRequested,
         values(TicketEncryptionType) as EncryptionTypes
@@ -146,20 +156,21 @@ index=winlogs EventCode=4769
 
 ![](images/06-4769-with-enctypes.png)
 
-My service-ticket requests returned `0x12`, which represents AES256.
+The tickets generated in my environment used `0x12`, which represents AES256.
 
-The course example produced RC4-HMAC tickets, but I was unable to reproduce that result in my environment. The same Kerberoasting workflow continued returning AES256 service tickets.
+The course example produced RC4 tickets, but my domain continued returning AES256. This was not a failed execution. The ticket requests, Event ID 4769 telemetry, captured ticket material, and offline-cracking workflow were all present.
 
-Instead of forcing the environment to match the example, I continued with the telemetry my domain actually produced.
+The difference was the encryption type selected by my environment.
 
 ---
 
 ## Translating the Encryption Values
 
-The raw encryption values are hexadecimal, so I used an SPL `case` statement to translate them into readable names:
+The event records encryption types as hexadecimal values, so I used a Splunk `case` statement to translate them into readable names:
 
 ```spl
-index=winlogs EventCode=4769
+index=winlogs
+| where EventCode = 4769
 | eval Ticket_Type_Translate=case(
     TicketEncryptionType="0x1", "DES-CBC-CRC",
     TicketEncryptionType="0x3", "DES-CBC-MD5",
@@ -177,44 +188,23 @@ index=winlogs EventCode=4769
 
 ![](images/07-4769-enctypes-translated.png)
 
-This confirmed that the tickets generated by my execution used AES256.
+This confirmed that my Kerberoasting execution produced AES256 tickets.
 
-Because legitimate ticket requests in my environment also used AES256, encryption type alone did not distinguish the Kerberoasting activity from normal Kerberos behavior.
+Legitimate ticket requests in my environment also used AES256. That meant AES256 was not the malicious signal by itself.
 
-The more useful signal was the number of distinct services requested by one account in a short period.
+The stronger signal was the requesting behavior:
+
+> One account requested tickets for many distinct services within a short period.
+
+Encryption type remained useful context, but the ticket volume and service fan-out provided the more general detection opportunity.
 
 ---
 
-## Building the Lab Detection
+## Building the Detection
 
-I grouped the events into one-hour buckets and counted the number of distinct services requested by each account:
+I grouped the events into one-hour buckets and counted the number of distinct services requested by each account.
 
-```spl
-index=winlogs EventCode=4769
-| bin span=1h _time
-| stats dc(ServiceName) as TicketRequestedCount,
-        values(ServiceName) as ServicesRequested,
-        values(TicketEncryptionType) as EncryptionTypes
-        by TargetUserName, _time
-| where TicketRequestedCount > 5
-```
-
-This detection fires when one account requests tickets for more than five distinct services within a one-hour bucket.
-
-The encryption types remain in the results as analyst context, but they are not required for the alert to fire.
-
-This is important because:
-
-* My attack produced AES256 tickets.
-* A different Kerberoasting procedure may produce RC4 tickets.
-* Encryption type does not change the underlying burst of service-ticket requests.
-* Requiring AES256 or RC4 would unnecessarily limit the behavioral detection.
-
-The threshold of more than five distinct services is based only on the activity observed in my lab. It is not a production recommendation.
-
-### Query Used During the Original Lab Validation
-
-The version I initially used during the exercise included an AES256 filter:
+During the original lab validation, I used this query:
 
 ```spl
 index=winlogs EventCode=4769 TicketEncryptionType="0x12"
@@ -227,41 +217,75 @@ index=winlogs EventCode=4769 TicketEncryptionType="0x12"
 
 ![](images/08-kerberoast-alert.png)
 
-That query successfully identified my execution because all of my generated tickets used AES256.
+The query successfully identified my execution:
 
-After reviewing the result, I determined that AES256 was an environmental characteristic rather than the malicious behavior itself. The broader version above retains encryption type for context but bases the alert on the burst of distinct service-ticket requests.
+* `Administrator@CONDEF.LOCAL` requested the tickets
+* Eight distinct service accounts were targeted
+* The requests occurred within the same one-hour bucket
+* The tickets used AES256
+
+This validated that the behavior was visible and searchable in my environment.
+
+However, the AES256 filter was specific to the result I observed. It was not the behavior that made the activity suspicious.
+
+A more general version of the detection is:
+
+```spl
+index=winlogs EventCode=4769
+| eval Ticket_Type_Translate=case(
+    TicketEncryptionType="0x1", "DES-CBC-CRC",
+    TicketEncryptionType="0x3", "DES-CBC-MD5",
+    TicketEncryptionType="0x11", "AES128-CTS-HMAC-SHA1-96",
+    TicketEncryptionType="0x12", "AES256-CTS-HMAC-SHA1-96",
+    TicketEncryptionType="0x17", "RC4-HMAC",
+    TicketEncryptionType="0x18", "RC4-HMAC-EXP",
+    true(), TicketEncryptionType
+)
+| bin span=1h _time
+| stats dc(ServiceName) as TicketRequestedCount,
+        values(ServiceName) as ServicesRequested,
+        values(Ticket_Type_Translate) as EncryptionTypes
+        by TargetUserName, _time
+| where TicketRequestedCount > 5
+```
+
+This version retains encryption type as analyst context but does not require either RC4 or AES.
+
+It can therefore identify the high-volume service-ticket behavior regardless of which supported encryption type the domain controller returns.
+
+The threshold of more than five distinct services is based only on the behavior observed in my lab. It is not a production recommendation and would require environmental baselining before operational use.
 
 ---
 
 ## Why the Detection Works
 
-The detection focuses on a behavioral requirement of bulk Kerberoasting.
+Bulk Kerberoasting requires the attacker to request service tickets for accounts with SPNs.
 
-To collect several service-ticket hashes, the attacking account must request tickets for several SPNs. Each request generates Event ID 4769 on the domain controller.
+Each request creates Event ID 4769 on the domain controller.
 
-The query therefore looks for:
+The detection looks for three related characteristics:
 
 1. One requesting account
 2. Many distinct service names
-3. Within a limited period
+3. Requests occurring within a limited period
 
-The exact tool is less important than the ticket-requesting behavior it produces.
+The technique can be performed with different tools and encryption types, but the requests still have to occur.
 
-The encryption type can increase or decrease confidence:
+Encryption type can change the confidence of the result:
 
-* RC4 requests may be more suspicious in an AES-dominant environment.
-* AES requests cannot be dismissed because AES tickets can still be cracked.
-* The account, service names, source address, ticket count, and normal environmental baseline must be considered together.
+* RC4 may be highly suspicious in an environment where legitimate systems normally use AES.
+* AES cannot be treated as safe because AES tickets can still be cracked offline.
+* A burst of requests for many SPNs may be suspicious regardless of encryption type.
+
+The account, service names, encryption type, timing, source system, and environmental baseline should therefore be evaluated together.
 
 ---
 
-## Network-Layer Corroboration
+## The Network View
 
 I also investigated the activity from the network perspective using Malcolm.
 
-Kerberos network telemetry exposed the requesting account and requested service names, even though the ticket contents were encrypted.
-
-Because my tickets used AES256, I searched Arkime with:
+Because my execution produced AES256 tickets, I searched Arkime with:
 
 ```text
 zeek.kerberos.cipher == aes256-cts-hmac-sha1-96 && zeek.kerberos.request_type == TGS
@@ -276,29 +300,29 @@ Source: zeek.kerberos.cname
 Destination: zeek.kerberos.sname
 ```
 
-This graphed the requesting accounts against the services for which they requested tickets:
+This graphed the requesting account against the services for which it requested tickets:
 
 ![](images/10-arkime-connection-graph.png)
 
-The graph showed `Administrator/CONDEF.LOCAL` fanning out to the service accounts created for the exercise.
+The graph showed `Administrator/CONDEF.LOCAL` fanning out to the accounts created for the Kerberoasting exercise.
 
-That was the same one-to-many relationship I observed in Splunk:
+That was the same one-to-many pattern I observed in Splunk:
 
 * One requesting account
-* Multiple service names
+* Multiple service accounts
 * Requests occurring close together
 
-Splunk showed the activity from the domain controller's event logs, while Malcolm showed it from independently collected network traffic.
+Splunk showed the activity from the domain controller's Windows event logs. Malcolm showed it through independently collected network telemetry.
 
-The agreement between those two sources increased confidence that I was looking at the intended execution rather than an isolated parsing or collection issue.
+Having both sources show the same behavior increased my confidence that I had correctly identified the execution.
 
 ---
 
 ## Cracking an AES256 Ticket
 
-The course exercise focused primarily on detection and did not require cracking the captured tickets. I continued beyond that point to demonstrate the offline-cracking stage.
+The course exercise focused on generating and detecting the Kerberoasting telemetry. Cracking the tickets was not required, but I continued to the offline-cracking stage.
 
-My tickets used AES256, corresponding to Kerberos encryption type 18. The matching Hashcat mode is `19700`.
+My captured tickets used AES256, corresponding to Kerberos encryption type 18. The matching Hashcat mode is `19700`.
 
 My attacker VM was CPU-only, so I extracted one ticket into a separate file and ran:
 
@@ -310,20 +334,19 @@ hashcat -m 19700 -a 0 onehash.txt rockyou.txt --force
 
 Hashcat ran at approximately 12,000 guesses per second and recovered the password `Password123!` for the `User1` account.
 
-That completed the technical workflow demonstrated in this lab:
+That completed the technical workflow demonstrated in my lab:
 
-1. Request the service ticket
-2. Save the TGS-REP hash material
-3. Detect the requests in Windows telemetry
-4. Corroborate the requests in network telemetry
-5. Test the captured ticket offline
-6. Recover the weak service-account password
+1. Create accounts with SPNs
+2. Request service tickets
+3. Save the returned TGS-REP material
+4. Detect the requests in Windows telemetry
+5. Corroborate the requests in network telemetry
+6. Test a captured ticket offline
+7. Recover the weak service-account password
 
-For this execution, I authenticated to `GetUserSPNs.py` as the domain Administrator. I therefore did not demonstrate the complete attack path beginning with a compromised low-privileged account.
+AES made each password guess more computationally expensive than RC4 would have, but it did not protect a weak password from being recovered.
 
-I demonstrated the ticket-requesting, detection, correlation, and offline-cracking portions of Kerberoasting.
-
-The AES256 ticket cracked much more slowly than an equivalent RC4 ticket would. That does not make AES tickets safe when the underlying service-account password is weak, but it makes each password guess more computationally expensive.
+Strong, unique service-account passwords remain necessary even when AES is used.
 
 ---
 
@@ -331,75 +354,64 @@ The AES256 ticket cracked much more slowly than an equivalent RC4 ticket would. 
 
 Requesting several service tickets is not automatically malicious.
 
-Potential benign causes may include:
+Potential benign causes include:
 
-* Administrative scripts that contact several services
-* Management or monitoring platforms
-* Service-discovery activity
-* Authentication workflows involving several SPNs
-* Accounts that legitimately interact with many services
-* Lab, development, or vulnerability-assessment tools
+* Administrative scripts that connect to several services
+* Monitoring and management platforms
+* Service-discovery processes
+* Applications that authenticate to multiple back-end services
+* Accounts that legitimately interact with many SPNs
+* Authorized security testing
 
 Before using this detection outside the lab, I would baseline:
 
 * The normal number of distinct services requested by each account
-* Accounts that routinely request large numbers of tickets
-* Expected service names
+* Accounts that routinely request high ticket volume
 * Expected source systems
+* Expected service names
 * Normal encryption types
-* Time-of-day patterns
 * Differences between human, machine, and service accounts
+* Time-of-day and scheduled-task patterns
 
-Possible tuning approaches include:
+I would avoid broadly allowlisting a high-volume account solely because the behavior is common. If that account were compromised, the exclusion could hide malicious ticket requests.
 
-* Maintaining a reviewed list of known high-volume requesting accounts
-* Separating human and machine-account baselines
-* Increasing risk when RC4 is unusual in the environment
-* Increasing risk when the requesting account has not previously contacted the services
-* Correlating the requests with endpoint or network activity from the same source
-* Alerting separately on access to especially privileged service accounts
-
-Allowlisting should be narrow and evidence-based. Excluding an account solely because it often generates high ticket volume could hide abuse if that account is later compromised.
+Any allowlist should be narrow, documented, and regularly reviewed.
 
 ---
 
 ## Limitations
 
-This lab detection does not identify every possible Kerberoasting attempt.
+### Low-volume targeting
 
-### Low-volume requests
+An attacker may request only one or two high-value service tickets and remain below the threshold.
 
-An attacker requesting only one or two high-value service tickets may remain below the threshold.
+### Slow Kerberoasting
 
-### Slow activity
-
-An attacker can distribute requests over a longer period to avoid creating a visible burst.
+An attacker can distribute the requests over a longer period to avoid producing an obvious burst.
 
 ### Fixed time buckets
 
-The use of one-hour `bin` buckets can split related requests across the boundary between two buckets.
+The one-hour `bin` command creates fixed buckets. Related events near the boundary between two buckets may be separated.
 
-A production detection would need a carefully defined schedule and may benefit from a rolling rather than fixed window.
+### Lab-specific threshold
 
-### Threshold specificity
+The threshold of more than five distinct services was selected from a small lab environment. A production domain may have very different normal behavior.
 
-The `TicketRequestedCount > 5` threshold comes from a small lab environment. A production domain may have very different normal behavior.
+### Encryption type is not definitive
 
-### Encryption-type differences
+RC4 may increase suspicion, but AES tickets can also be Kerberoasted. Neither encryption type proves or disproves malicious activity by itself.
 
-Requiring only RC4 would miss AES Kerberoasting. Requiring only AES would miss RC4 Kerberoasting.
+### Telemetry dependencies
 
-Encryption type is therefore retained as context rather than treated as a universal requirement.
+The host-side detection depends on Event ID 4769 being generated, collected, parsed, and retained.
 
-### Telemetry dependency
+The network-side investigation depends on visibility into the Kerberos traffic and correctly parsed Zeek telemetry.
 
-The host-side detection depends on the domain controller generating and collecting Event ID 4769.
+### Representative execution
 
-The network-side view depends on having visibility into the Kerberos traffic and correctly parsed Zeek telemetry.
+I authenticated to `GetUserSPNs.py` as the domain Administrator because the goal of the lab was to generate representative telemetry.
 
-### Attacker account context
-
-The requesting account shown in the event is not necessarily the final target of the investigation. It may be a legitimate account whose credentials have already been compromised.
+This execution did not demonstrate the complete attack path beginning with a compromised low-privileged user. It successfully demonstrated the ticket-requesting, detection, network-correlation, and offline-cracking stages.
 
 ---
 
@@ -408,34 +420,41 @@ The requesting account shown in the event is not necessarily the final target of
 If this detection fired, I would investigate:
 
 1. Which account requested the tickets?
-2. From which IP address or system did the requests originate?
+2. Which system or IP address originated the requests?
 3. Which service accounts were targeted?
 4. How many distinct services were requested?
-5. Over what period did the requests occur?
-6. Which encryption types were used?
-7. Is this ticket volume normal for the requesting account?
-8. Are the targeted accounts privileged or broadly accessible?
-9. Is there related process or network telemetry on the source system?
-10. Did the same source perform additional Active Directory discovery?
-11. Does the account show signs of earlier compromise?
-12. Are any of the targeted service-account passwords weak, old, or reused?
+5. How quickly did the requests occur?
+6. Which encryption types were returned?
+7. Is this volume normal for the requesting account?
+8. Are the targeted service accounts privileged?
+9. Does the source system show related discovery or credential-access activity?
+10. Has the requesting account shown other signs of compromise?
+11. Can the ticket requests be explained by an approved application or administrative process?
+12. Do the targeted service accounts use strong, managed passwords?
 
-The alert would be stronger if the requesting account were unusual, the service accounts were privileged, RC4 were rare in the environment, or the same source showed additional discovery or credential-access behavior.
+The alert would become more suspicious if:
+
+* The requesting account normally contacts very few services
+* The source system is unusual
+* The targeted accounts are highly privileged
+* RC4 is rare in the environment
+* The source also performed Active Directory discovery
+* The requests occurred outside normal operating hours
 
 ---
 
 ## Key Takeaways
 
-* Event ID 4769 provides the requesting account, requested service, and ticket encryption type needed to investigate Kerberoasting activity.
-* The course example produced RC4 tickets, but my environment returned AES256.
-* I adapted the detection to my observed telemetry rather than changing the results to match the example.
-* AES tickets can still be Kerberoasted and cracked offline.
-* In my lab, the strongest signal was one account requesting tickets for many distinct services in a short period.
-* Encryption type is useful context, but it is not a universal requirement for detecting Kerberoasting.
-* Splunk and Malcolm independently showed the same one-to-many service-request pattern.
-* Cracking one AES256 ticket demonstrated that encryption strength cannot compensate for a weak service-account password.
-* The threshold and exclusions are lab-specific and require baselining before operational use.
-* This exercise demonstrated representative Kerberoasting telemetry, not a complete low-privilege attack path.
+* I successfully completed the Kerberoasting telemetry exercise even though my environment returned AES256 instead of the RC4 result shown in the course.
+* Kerberoasting does not require RC4. AES service tickets can also be captured and cracked offline.
+* Event ID 4769 exposes the requesting account, requested service, and ticket encryption type.
+* In my lab, the strongest signal was one account requesting tickets for eight distinct services within a short period.
+* The AES256 filter worked for validating my specific execution, but the generalized behavioral detection should not require one encryption type.
+* Splunk and Malcolm independently showed the same one-to-many ticket-request pattern.
+* Cracking one captured ticket demonstrated that AES cannot compensate for a weak service-account password.
+* The threshold and tuning decisions are specific to my lab and would require production baselining.
+* The exercise generated representative Kerberoasting telemetry rather than reproducing a complete low-privilege attack path.
+* Producing a different encryption result forced me to analyze my own telemetry instead of copying the course's expected output.
 
 ---
 
