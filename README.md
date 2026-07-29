@@ -14,10 +14,10 @@ The SPL queries are only one part of the work. The primary focus of this portfol
 
 ## What This Portfolio Demonstrates
 
+* Investigating failed detections by tracing missing results to audit-policy, telemetry, and ingestion dependencies
 * Building and operating a multi-source detection lab
 * Translating attacker behavior into observable telemetry
 * Developing and iteratively refining SPL detections
-* Diagnosing logging, audit-policy, and ingestion dependencies
 * Baselining normal behavior and investigating false positives
 * Testing multiple attack procedures against the same telemetry
 * Correlating Windows host telemetry with network evidence
@@ -98,7 +98,7 @@ Additional detections will be added to the catalog as their investigation and va
 | CERTER | `192.168.137.136` | Domain member server and Sysmon configuration-push host |
 | Win11V | `192.168.137.137` | Domain-joined Windows workstation, Sysmon endpoint, and primary attack target |
 | Win11A | `192.168.137.138` | Domain-joined Windows workstation with Sysmon |
-| LinuxA | `192.168.137.139` | Attacker system running Metasploit and later Mythic C2 |
+| LinuxA | `192.168.137.139` | Attacker system running Metasploit |
 | Malcolm | `192.168.137.140` | Network traffic analysis appliance |
 | LinuxV | `192.168.137.141` | Linux, Minikube, Kubernetes, auditd, and Laurel telemetry host |
 
