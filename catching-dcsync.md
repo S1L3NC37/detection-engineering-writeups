@@ -1,40 +1,57 @@
 # Catching DCSync: Detecting Domain Replication Abuse
 
-**Lab:** `condef.local` · **Platform:** Windows / Active Directory · **Log sources:** Windows Security (4662, 4769), Zeek/Arkime network capture · **SIEM:** Splunk · **ATT&CK:** T1003.006 (OS Credential Dumping: DCSync) · Tactic: Credential Access
+**Lab:** `condef.local` · **Platform:** Windows / Active Directory · **Log sources:** Windows Security (4662, 4769), Zeek/Arkime network capture · **SIEM:** Splunk · **ATT&CK:** T1003.006 (OS Credential Dumping: DCSync) · **Tactic:** Credential Access
 
 ## TL;DR
 
-DCSync lets an attacker pretend to be a domain controller and ask a real DC to hand over account password data through the normal AD replication protocol. The detection primitive is simple once you see it: a directory replication request (the "Replicating Directory Changes" rights) coming from something that is not a domain controller. Whatever tool runs the attack, it has to make that replication call, and only DCs are supposed to. I caught it two ways in my lab, on the DC's Windows logs and independently on the network capture, and along the way I learned that my detection query was useless until I turned on the log source feeding it.
+DCSync abuses the same Active Directory replication functionality that domain controllers use to synchronize directory data. An attacker with the required replication permissions can request password material from a domain controller without accessing `ntds.dit` directly or dumping LSASS memory on the DC.
+
+I ran DCSync from a Windows 11 workstation and detected the use of directory replication rights in Windows Event 4662. My first attempt returned no results because the domain controller was not configured to generate the required event. After enabling Directory Service Access auditing and configuring a SACL on the domain object, the detection succeeded.
+
+The 4662 result identified the account performing the replication operation but did not provide usable source-host information through my 4624 enrichment. I investigated Event 4769 to recover the client IP, then independently confirmed the workstation-to-DC replication traffic through Malcolm, Zeek, and Arkime.
 
 ## What DCSync is
 
-DCSync abuses Active Directory replication. When two domain controllers need to stay in sync, one asks the other to send over directory changes. That is a legitimate, built-in protocol. DCSync takes advantage of it: instead of reading credentials out of memory on a machine like I did with LSASS dumping, it sends a replication request over the network and asks the DC to send back the secrets for an account. The DC answers, because the request looks like it came from another DC.
+Active Directory uses replication to keep domain controllers synchronized. During legitimate replication, one domain controller requests directory changes from another.
 
-I ran it with Mimikatz, a credential-access tool that, among many other things, can perform this replication pull. If I target the built-in Administrator or the `krbtgt` account, the data that comes back is enough to forge Kerberos tickets and move around the domain at will, which is why DCSync is treated as a domain-compromise-level event. Real intrusions use it for exactly that reason: it pulls high-value credentials while blending in with traffic the domain is supposed to see.
+DCSync abuses that functionality. Instead of reading credentials from process memory, the attacker sends a replication request to a domain controller and asks it to return password data for an account. The request succeeds when the account being used has the necessary directory replication rights.
+
+I performed the attack with Mimikatz using an account that already had those privileges. DCSync can retrieve high-value credential material such as NTLM hashes and Kerberos keys without executing credential-dumping code directly on the domain controller.
+
+The impact depends on which account is requested. Retrieving the built-in Administrator account provides reusable privileged credential material. Retrieving the `krbtgt` account would expose the key material used to create Golden Tickets.
 
 ## Running the attack
 
-I ran the attack from win11a against the DC. The command:
+I ran the attack from `win11a` against the domain controller:
 
-```
+```text
 lsadump::dcsync /domain:condef.local /user:Administrator
 ```
 
 ![Mimikatz DCSync output showing the Administrator NTLM hash and Kerberos keys](images/01-mimikatz-dcsync-output.png)
 
-Mimikatz impersonated the DC and pulled the Administrator account. What came back:
+Mimikatz requested the credential material for the built-in Administrator account. The output included:
 
-- **NTLM hash** (`64f12c...`): the actual hash of the Administrator password. It does not need cracking. With pass-the-hash, the hash itself works as the credential.
-- **aes256 / aes128 Kerberos keys**: the material used for overpass-the-hash or forging tickets.
-- **Password last change: 7/2/2026**: tells me how current the hash is.
+* **NTLM hash** (`64f12c...`): reusable authentication material that can support pass-the-hash.
+* **AES256 and AES128 Kerberos keys**: reusable Kerberos authentication material.
+* **Password last change: 7/2/2026**: the date associated with the retrieved password material.
+* **Object Relative ID: 500**: confirms that the requested account was the built-in domain Administrator.
 
-The account is the built-in Administrator, RID 500 (shown as `Object Relative ID: 500`). Pulling its Kerberos keys is the raw material for a Golden Ticket, so this one account is a big deal on its own.
+This was not a Golden Ticket test. Golden Ticket creation requires the key or password hash of the domain’s `krbtgt` account. In this run, I specifically requested the Administrator account.
 
-## Detecting it on the DC (Event 4662)
+## Detecting replication-right use with Event 4662
 
-The first place I looked was event 4662, "an operation was performed on an object." This event carries GUIDs in its Properties field that map to the specific rights used. For DCSync the one I care about is `1131f6ad-9c07-11d1-f79f-00c04fc2dcd2`, which is the DS-Replication-Get-Changes-All right. I used a domain admin account for this, which already has that right. Worth remembering that in a real network, lower-privileged accounts sometimes end up with this right through troubleshooting or old technical debt, so this is not only a domain-admin problem.
+The first Windows event I investigated was Event 4662, **“An operation was performed on an object.”**
 
-My detection query keys on that GUID, filters out normal noise, and joins in logon context:
+For DCSync detection, the important data appears in the event’s `Properties` field. The replication rights include:
+
+* `1131f6ac-9c07-11d1-f79f-00c04fc2dcd2`: DS-Replication-Get-Changes
+* `1131f6ad-9c07-11d1-f79f-00c04fc2dcd2`: DS-Replication-Get-Changes-All
+* `9923a32a-3607-11d2-b9be-0000f87a36b2`: DS-Replication-Get-Changes-In-Filtered-Set
+
+I used a domain administrator account for the test, so the account already possessed the permissions needed to make the replication request.
+
+This was the Splunk query I used. It searches for Event 4662 records involving the domain object and replication rights, then attempts to enrich the result with Event 4624 logon context:
 
 ```spl
 index=winlogs EventCode=4662 AND NOT (SubjectUserSid="NT AUTHORITY\LOCAL SERVICE" AND SubjectDomainName="Window Manager")
@@ -59,13 +76,13 @@ index=winlogs EventCode=4662 AND NOT (SubjectUserSid="NT AUTHORITY\LOCAL SERVICE
 | table DSTime, Computer, DSUserSid, DSDomainName, DSUserName, DSObjectType, DSObjectName, DSProperties, DSStatus, DSLogonId, LogonTime, AuthenticationPackageName, src_ip, IpPort, IsDC
 ```
 
-### It returned nothing, and figuring out why was the real lesson
+### It returned nothing
 
-I ran that and got **no results**. The attack had just fired, so something was off.
+I ran the query immediately after the attack and received no results.
 
 ![Full detection query returning zero results](images/02-detection-query-zero-results.png)
 
-First thing I did was strip the query down to just the event code to see if 4662 was even present:
+I stripped the search down to the event code to determine whether Event 4662 was present at all:
 
 ```spl
 index=winlogs EventCode=4662
@@ -73,7 +90,9 @@ index=winlogs EventCode=4662
 
 ![Bare 4662 search also returning zero results](images/03-bare-4662-zero-results.png)
 
-Still nothing. So either the pipeline was broken or the DC was not generating 4662 at all. I did a sanity check to make sure Windows events were reaching Splunk:
+That search also returned nothing.
+
+At that point, either the Windows event pipeline was not working or the domain controller was not generating Event 4662. I checked the entire index:
 
 ```spl
 index=winlogs
@@ -81,44 +100,99 @@ index=winlogs
 
 ![winlogs index populated with 634 events from host DC](images/04-winlogs-pipeline-healthy.png)
 
-634 events, sourcetype `XmlWinEventLog:Security`, host DC. The pipeline was healthy. So this was not a forwarding problem. The DC simply was not producing 4662. I could even see the clue in what I did have: plenty of 5145 (network share access) events but no 4662, which meant object-access auditing was partly on but the specific piece that produces 4662 was not.
+Splunk returned 634 events with the `XmlWinEventLog:Security` sourcetype from host `DC`. Windows Security events were reaching Splunk, so the absence of Event 4662 was not caused by a general forwarding failure.
 
-That piece is the Directory Service Access audit subcategory. I checked it on the DC in PowerShell:
+The domain controller was not generating the event.
 
-```
+## Enabling Directory Service Access auditing
+
+Event 4662 depends on the **Directory Service Access** audit subcategory. I checked its status on the domain controller:
+
+```powershell
 auditpol /get /subcategory:"Directory Service Access"
 ```
 
 ![auditpol showing Directory Service Access set to No Auditing](images/05-ds-access-auditing-off.png)
 
-**No Auditing.** That was the answer. Event 4662 only fires when Directory Service Access auditing is on, so DCSync had been running completely silent. My query was correct the whole time. The log source it depended on was switched off. This whole flow was new to me and I learned my way around auditpol doing it, which was worth the detour on its own.
+The result was **No Auditing**.
 
-I turned it on and verified:
+This explained why the attack had not produced Event 4662. The underlying activity occurred, but the Windows auditing configuration required by the detection was disabled.
 
-```
+I enabled successful Directory Service Access auditing and verified the result:
+
+```powershell
 auditpol /set /subcategory:"Directory Service Access" /success:enable
 auditpol /get /subcategory:"Directory Service Access"
 ```
 
 ![auditpol confirming Directory Service Access now set to Success](images/06-ds-access-auditing-on.png)
 
-There is a second half to this that tripped me up, and it is easy to miss. The audit subcategory is the master switch, but the directory object itself also needs a SACL telling Windows which access rights to record. Without it, I could enable auditing, rerun the attack, and still get nothing. So I set the SACL on the domain object. In ADSI Edit, connected to the Default naming context, I opened the properties of the domain root object (`DC=condef,DC=local`), went to Security, Advanced, the Auditing tab, and added an entry: principal Everyone, type Success, applies to this object and all descendant objects, with Replicating Directory Changes and Replicating Directory Changes All checked. Those two rights are near the bottom of a long permissions list, so they are easy to scroll past.
+Enabling the audit subcategory was only the first requirement.
 
-With auditing on and the SACL in place, I reran the DCSync from win11a and ran the query again.
+Event 4662 is generated when the performed operation matches an auditing entry in the target object’s system access control list, or SACL. Without the appropriate SACL on the Active Directory object, enabling the audit policy alone still did not produce the event I needed.
+
+In ADSI Edit, I connected to the **Default naming context** and opened the domain root object:
+
+```text
+DC=condef,DC=local
+```
+
+Under **Security > Advanced > Auditing**, I added a successful auditing entry for the `Everyone` principal that applied to the object and its descendants. I selected:
+
+* Replicating Directory Changes
+* Replicating Directory Changes All
+
+With both the audit subcategory and the SACL configured, I reran DCSync from `win11a`.
+
+## Successful Event 4662 detection
+
+I ran the Splunk query again after repeating the attack:
 
 ![Detection query now returning the DCSync event](images/07-4662-detection-result.png)
 
-This time it caught the DCSync. The row shows `CONDEF\Administrator` targeted, object `DC=condef,DC=local`, right `Replicating Directory Changes All`, status success. The detection worked.
+This time, the query returned an Event 4662 result.
 
-### The enrichment half exposed something interesting
+The event showed:
 
-The query does two jobs. The first block is the detection: the 4662 plus the replication GUID. The second block is enrichment, a left join to 4624 logon events meant to pull in the source IP, port, and authentication package behind the replication. That is what the `IsDC` field is built on, since replication from a host that is not a DC is the suspicious condition.
+* **Subject account:** `CONDEF\Administrator`
+* **Object:** `DC=condef,DC=local`
+* **Property:** `Replicating Directory Changes All`
+* **Status:** Success
 
-But the `IsDC` column came back reading **"No source IP in 4624 (Kerberos logon)."** That is the finding. The logon behind this DCSync authenticated over Kerberos, and Kerberos 4624 events often log a blank IpAddress, because the address lives in the Kerberos ticket exchange rather than the logon event. So the detection succeeded, but the source IP I wanted to attribute the attacker was not in the 4624. I built that explicit branch into the `case` statement on purpose so the gap shows up in the table instead of leaving a blank I would have to puzzle over later.
+The Subject fields identify the account that performed the directory operation. They do not identify the account whose credential material was requested.
 
-## Recovering the source IP (Event 4769)
+In this test, `CONDEF\Administrator` was both the account I used to execute DCSync and the account I requested from the domain controller. The Event 4662 record confirms that Administrator performed a successful replication-right operation against the domain object. The Mimikatz output separately confirms that the requested credential target was Administrator.
 
-Since the 4624 could not attribute the attacker, I went to the Kerberos service-ticket events. 4769 (TGS-REQ) is logged on the DC and it does record the requesting client's address.
+## The 4624 enrichment did not provide a source
+
+The first portion of my Splunk search identifies the Event 4662 replication operation. The second portion attempts to join the event to an Event 4624 logon using the computer and logon ID.
+
+I intended to use the joined 4624 fields to retrieve:
+
+* Logon time
+* Authentication package
+* Source IP
+* Source port
+
+Those fields would then feed the `IsDC` calculation.
+
+The result displayed:
+
+```text
+No source IP in 4624 (Kerberos logon)
+```
+
+That text was generated by my own `case` statement whenever `src_ip` was null or blank. It was not a value recorded directly by Windows.
+
+The other joined fields, including `LogonTime`, `AuthenticationPackageName`, `src_ip`, and `IpPort`, were also blank. From this output alone, I could not determine whether the join found a matching 4624 event with no IP address or failed to find a usable matching 4624 event at all.
+
+The core Event 4662 detection still succeeded, but the enrichment did not provide enough information to identify the originating system.
+
+## Recovering the source IP with Event 4769
+
+Because the 4624 enrichment did not return usable source information, I investigated Event 4769, **“A Kerberos service ticket was requested.”**
+
+Event 4769 includes the client address associated with the service-ticket request. I searched for requests involving the Administrator account:
 
 ```spl
 index=winlogs EventCode=4769 TargetUserName="Administrator*"
@@ -128,44 +202,112 @@ index=winlogs EventCode=4769 TargetUserName="Administrator*"
 
 ![4769 query showing source IP 192.168.137.138 across all events](images/08-4769-source-ip-recovery.png)
 
-One thing that cost me a few minutes: my first attempt used the field names from the Windows event viewer (`Account_Name`, `Service_Name`, `Client_Address`) and returned zero results even though the events were there. Splunk's TA parses them as `TargetUserName`, `ServiceName`, and `IpAddress`. I had to read the raw event to find the real names. Lesson filed away: confirm field names against the raw event, do not trust the display labels.
+My first version of the search used the Windows Event Viewer display labels:
 
-The address also comes through IPv6-mapped, like `::ffff:192.168.137.138`, so I strip the `::ffff:` prefix with `replace` to get a clean IPv4.
+* `Account_Name`
+* `Service_Name`
+* `Client_Address`
 
-The result gave me the source: `192.168.137.138`, which is win11a, consistent across all 11 events. The ServiceName column traces the whole Kerberos sequence leading into the attack: `krbtgt` (getting the ticket-granting ticket), `DC$` (requesting a ticket to authenticate to the DC), and `WIN11A$`, the machine account, which names the origin host directly. One `::1` row is the DC talking to itself and I ignored it. So the source IP the 4624 could not give me was fully recovered from 4769.
+Those field names returned no results. After inspecting the raw event in Splunk, I found that the Splunk Technology Add-on had parsed the fields as:
 
-The `TicketEncryptionType` is `0x12` throughout, which is AES256. That is the normal ticket type here and not suspicious. I note it only because a downgrade to `0x17` (RC4) on this same event would point at Kerberoasting, a different attack.
+* `TargetUserName`
+* `ServiceName`
+* `IpAddress`
 
-Only domain controllers should be doing replication, so win11a doing it is the anomaly, and now I can name the host that did it.
+After correcting the field names, the search returned the events.
 
-## Confirming it on the network (Malcolm / Zeek / Arkime)
+The IP addresses appeared in IPv6-mapped IPv4 format:
 
-I wanted to see the same attack on the wire, so I switched to my Malcolm box, which had been capturing the whole time, and searched Arkime:
-
+```text
+::ffff:192.168.137.138
 ```
+
+I used `replace` to remove the `::ffff:` prefix.
+
+The client address was consistently:
+
+```text
+192.168.137.138
+```
+
+That address belongs to `win11a`, the workstation from which I ran Mimikatz.
+
+The `ServiceName` values included `krbtgt`, `DC$`, and `WIN11A$`. In Event 4769, `ServiceName` identifies the service account for which a ticket was requested. It does not identify the requesting computer. The `src_ip` field was the evidence that identified `win11a` as the client.
+
+One result used the loopback address `::1`, indicating local activity on the domain controller. The remaining results consistently identified `192.168.137.138`.
+
+The ticket encryption type was `0x12`, or AES256. I recorded that as additional context, but it was not part of my DCSync detection condition.
+
+The Event 4769 investigation gave me the source information that the 4624 enrichment did not provide.
+
+## Confirming DCSync on the network
+
+I then checked the network capture in Malcolm and searched Arkime for the DRSUAPI operation associated with the attack:
+
+```text
 zeek.notice.msg == drsuapi::DRSGetNCChanges
 ```
 
 ![Arkime session and Zeek notice classifying the DCSync as T1003.006](images/09-arkime-drsuapi-notice.png)
 
-That returned one session, and it is the DCSync. DCSync rides over Microsoft RPC on the DRSUAPI interface, and the specific call that pulls the account data is `DRSGetNCChanges`. That call is the network equivalent of the 4662 I detected on the DC.
+The search returned one matching session.
 
-What makes this result strong is that Malcolm's Zeek layer did not just show me raw RPC and leave me to interpret it. It classified the session. The Zeek notice.log fields name it outright: Notice Type `ATTACK::Credential_Access`, Message `drsuapi::DRSGetNCChanges`, and a submessage of `T1003.006 OS Credential Dumping: DCSync`. The session is tagged Event Category ATTACK with a risk score of 80. So the network sensor identified the technique and even the ATT&CK ID on its own, which is a nice contrast to the Splunk side where I built the detection logic myself.
+DCSync uses Microsoft’s Directory Replication Service Remote Protocol. The `DRSGetNCChanges` operation requests directory replication data from a domain controller.
 
-The part that ties it all together is the source and destination. The notice shows `192.168.137.138` (win11a) reaching `192.168.137.135` (the DC) on port 49668, a dynamic high port, which is the normal DCE/RPC handoff after the endpoint mapper on 135. That win11a to DC path is the exact same one I attributed through the 4769 Kerberos events.
+The Zeek notice classified the session with:
 
-So I have the attack confirmed from two independent angles. The Windows host logs on the DC caught the replication and let me trace it back to win11a. The network capture caught the same replication on the wire and classified it as DCSync without relying on the DC's logging at all. Two sensors, two layers, one attack, and neither depends on the other.
+* **Notice Type:** `ATTACK::Credential_Access`
+* **Message:** `drsuapi::DRSGetNCChanges`
+* **Submessage:** `T1003.006 OS Credential Dumping: DCSync`
+* **Event Category:** `ATTACK`
+* **Risk score:** `80`
+
+The network session showed:
+
+* **Source:** `192.168.137.138` (`win11a`)
+* **Destination:** `192.168.137.135` (`DC`)
+* **Destination port:** `49668`
+
+The source and destination matched the systems involved in my test. The client IP also matched the address recovered through the Event 4769 investigation.
+
+This provided an independent network-level confirmation of the replication request. The Windows telemetry recorded use of the replication right on the domain controller, while Malcolm identified the corresponding `DRSGetNCChanges` communication from the workstation to the DC.
+
+## What the evidence established
+
+The different data sources answered different parts of the investigation:
+
+| Evidence                | What it established                                                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| Mimikatz output         | Administrator credential material was successfully requested                                        |
+| Event 4662              | `CONDEF\Administrator` performed a successful replication-right operation against the domain object |
+| Event 4769              | Kerberos service-ticket requests associated with Administrator came from `192.168.137.138`          |
+| Malcolm / Zeek / Arkime | `192.168.137.138` sent a `DRSGetNCChanges` request to the domain controller                         |
+| Lab inventory           | `192.168.137.138` was `win11a`, not a domain controller                                             |
+
+Event 4662 alone did not identify the credential target or provide a usable source IP through my enrichment. The Mimikatz output established the requested account, and the Kerberos and network telemetry established the originating workstation.
 
 ## Key takeaways
 
-- **A detection is only as good as the log source under it.** My 4662 query was correct from the first run and still returned nothing, because Directory Service Access auditing was off. Before trusting a quiet detection, verify the source is actually generating the event.
-- **Two switches, not one.** 4662 for DCSync needs both the audit subcategory enabled and a SACL on the domain object for the replication rights. Turning on one without the other still leaves you blind.
-- **Separate the core detection from the enrichment.** The 4662 plus replication-GUID signal stands on its own. The 4624 join is a nice-to-have that failed here, and I did not want the detection to depend on it.
-- **Kerberos logons hide the source IP.** 4624 often logs a blank address for Kerberos, so for DCSync attribution I leaned on 4769, which carries the client IP. The network capture confirmed it.
-- **The primitive is host-independent.** Whatever tool performs DCSync, it has to make a replication request, and only a DC should. That single observable, on the host log and on the wire, is what the whole detection rests on.
+* **A detection depends on its telemetry.** My initial search returned nothing because the domain controller was not generating Event 4662. Verifying the underlying event source prevented me from treating missing telemetry as a clean result.
+
+* **Event 4662 required two auditing components.** I needed both successful Directory Service Access auditing and a SACL on the domain object covering the replication rights.
+
+* **The Event 4662 subject is the actor, not the credential target.** The event showed that `CONDEF\Administrator` performed the replication operation. The Mimikatz output showed that Administrator was also the account requested during this specific test.
+
+* **The core detection and the enrichment produced different results.** The replication-right search succeeded, but the 4624 join did not return usable source context.
+
+* **A calculated label is not raw evidence.** The `IsDC` value came from my SPL logic. Because the joined fields were blank, the label could not prove why the source IP was missing.
+
+* **Event 4769 provided client attribution.** Its client address consistently identified `192.168.137.138`, while `ServiceName` identified the requested Kerberos service rather than the originating host.
+
+* **Network telemetry independently confirmed the activity.** Malcolm observed `DRSGetNCChanges` from `win11a` to the domain controller and classified it as DCSync.
+
+* **The suspicious condition was established through correlation.** In this lab, directory replication originated from a known workstation rather than the only domain controller. Windows and network evidence both pointed to the same source.
 
 ## References
 
-- MITRE ATT&CK T1003.006: https://attack.mitre.org/techniques/T1003/006/
-- Microsoft, Event 4662: https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4662
-- NVISO, Detecting DCSync and DCShadow network traffic: https://blog.nviso.eu/2021/11/15/detecting-dcsync-and-dcshadow-network-traffic/
+* MITRE ATT&CK, T1003.006: https://attack.mitre.org/techniques/T1003/006/
+* MITRE ATT&CK, T1558.001 Golden Ticket: https://attack.mitre.org/techniques/T1558/001/
+* Microsoft, Event 4662: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4662
+* Microsoft, Event 4769: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4769
+* NVISO, Detecting DCSync and DCShadow Network Traffic: https://blog.nviso.eu/2021/11/15/detecting-dcsync-and-dcshadow-network-traffic/
