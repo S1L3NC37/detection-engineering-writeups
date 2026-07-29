@@ -96,7 +96,7 @@ At that point, either the Windows event pipeline was not working or the domain c
 index=winlogs
 ```
 
-![winlogs index populated with 634 events from host DC](images/04-winlogs-pipeline-healthy.png)
+![winlogs index populated with 634 events from host dc](images/04-winlogs-pipeline-healthy.png)
 
 Splunk returned 634 events from host `dc`. The event metadata showed the source as `XmlWinEventLog:Security` and the sourcetype as `XmlWinEventLog`.
 
@@ -228,7 +228,7 @@ index=winlogs EventCode=4769 TargetUserName="Administrator*"
 | table _time, TargetUserName, ServiceName, src_ip, TicketEncryptionType
 ```
 
-![4769 query showing source IP 192.168.137.138 across the returned events](images/08-4769-source-ip-recovery.png)
+![4769 results showing repeated 192.168.137.138 client addresses and one loopback entry](images/08-4769-source-ip-recovery.png)
 
 My first version of the search used the Windows Event Viewer display labels:
 
