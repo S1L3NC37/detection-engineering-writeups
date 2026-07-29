@@ -98,7 +98,7 @@ index=winlogs
 
 ![winlogs index populated with 634 events from host DC](images/04-winlogs-pipeline-healthy.png)
 
-Splunk returned 634 events with the `XmlWinEventLog:Security` sourcetype from host `DC`.
+Splunk returned 634 events from host `dc`. The event metadata showed the source as `XmlWinEventLog:Security` and the sourcetype as `XmlWinEventLog`.
 
 Windows Security events were reaching Splunk, so the missing Event 4662 was not caused by a general forwarding failure. The domain controller was not generating the event.
 
