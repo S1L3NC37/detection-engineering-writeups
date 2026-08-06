@@ -18,6 +18,7 @@ The SPL queries are only one part of the work. The primary focus of this portfol
 * Building and operating a multi-source detection lab
 * Translating attacker behavior into observable telemetry
 * Developing and iteratively refining SPL detections
+* Validating detection output against known ground truth and testing assumptions about field formatting, time windows, and ingestion encoding
 * Baselining normal behavior and investigating false positives
 * Testing multiple attack procedures against the same telemetry
 * Testing whether detections survive basic evasion such as executable and service renaming
@@ -47,6 +48,12 @@ The Event 4662 result identified the account performing the directory operation 
 I used Impacket's WMIExec from a Linux attacker system and Microsoft Sysinternals PsExec from a Windows workstation to execute commands remotely on a domain-joined target. I traced the resulting activity through Sysmon, Windows Security and System events, Splunk, and Malcolm network telemetry.
 
 For WMIExec, I developed a Sysmon process-creation detection combining `WmiPrvSE.exe` ancestry with the timestamp-named output file used by the tested output-enabled mode. For PsExec, I tested how name-based detections held up after renaming both the executable and remote service. The original process-name query failed, but the renamed run remained visible through `PSEXEC-*.key` access on `ADMIN$`, Malcolm file extraction, and RPC operations against the Service Control Manager.
+
+### [Catching Discovery Commands on Windows Hosts](catching-discovery-commands.md)
+
+I ran Windows discovery and credential-enumeration commands from cmd.exe and PowerShell, then compared a command-line regex against known Sysmon ground truth. The query returned results while missing 12 of 23 selected process-creation events because the two shells recorded `net user` in forms the literal pattern did not match.
+
+I rebuilt the detection around resolved process images and distinct utility density within one execution context. A six-command validation burst exposed a second failure when fixed ten-minute buckets split the sweep and discarded two commands, so I replaced them with a rolling `streamstats` window and tested the result across seven days of lab activity. I also developed a separate WMI remote-execution ancestry rule, traced its initial zero-result failure to XML-escaped redirection text, and grouped the commands into one analyst-readable session using WMIExec's shared output filename.
 
 ### [Catching LSASS Credential Dumping Three Ways](catching-lsass-credential-dumping.md)
 
@@ -81,6 +88,8 @@ The writeup covers why each signal works in my environment, the false positives 
 | [DCSync: directory replication-right use](catching-dcsync.md) | Windows / Active Directory | Security EID 4662, EID 4769, DRSUAPI network telemetry | [T1003.006: DCSync](https://attack.mitre.org/techniques/T1003/006/) | Lab validated |
 | [WMIExec output-mode command execution](detecting-lateral-movement-wmiexec-psexec.md) | Windows | Sysmon EID 1, WMI/DCOM-RPC network telemetry | [T1047: Windows Management Instrumentation](https://attack.mitre.org/techniques/T1047/) | Lab validated |
 | [PsExec key-file access after executable and service renaming](detecting-lateral-movement-wmiexec-psexec.md) | Windows | Security EID 5145, SMB file-extraction and SVCCTL network telemetry | [T1021.002: SMB/Windows Admin Shares](https://attack.mitre.org/techniques/T1021/002/), [T1569.002: Service Execution](https://attack.mitre.org/techniques/T1569/002/) | Lab validated |
+| [Discovery-command density by execution context](catching-discovery-commands.md) | Windows | Sysmon EID 1 | [T1033: System Owner/User Discovery](https://attack.mitre.org/techniques/T1033/), [T1087.001: Local Account](https://attack.mitre.org/techniques/T1087/001/), [T1087.002: Domain Account](https://attack.mitre.org/techniques/T1087/002/), [T1082: System Information Discovery](https://attack.mitre.org/techniques/T1082/), [T1555.004: Windows Credential Manager](https://attack.mitre.org/techniques/T1555/004/) | Lab validated |
+| [WMI remote-command session by ancestry and ADMIN$ output](catching-discovery-commands.md) | Windows | Sysmon EID 1 | [T1047: Windows Management Instrumentation](https://attack.mitre.org/techniques/T1047/) | Lab validated |
 | [LSASS access by GrantedAccess rights](catching-lsass-credential-dumping.md) | Windows | Sysmon EID 10 | [T1003.001: LSASS Memory](https://attack.mitre.org/techniques/T1003/001/) | Lab validated |
 | [LSASS dump-file creation](catching-lsass-credential-dumping.md) | Windows | Sysmon EID 11 | [T1003.001: LSASS Memory](https://attack.mitre.org/techniques/T1003/001/) | Lab validated |
 | [Kerberoasting by service-ticket request volume](catching-kerberoasting.md) | Windows / Active Directory | Security EID 4769 | [T1558.003: Kerberoasting](https://attack.mitre.org/techniques/T1558/003/) | Lab validated |
