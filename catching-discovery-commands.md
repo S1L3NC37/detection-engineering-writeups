@@ -189,6 +189,8 @@ WmiPrvSE.exe -secured -Embedding
        └─ whoami.exe  "whoami"
 ```
 
+Those redirections are shown decoded for readability. The value Splunk actually indexes carries the event log's XML escaping, which becomes important two sections down.
+
 Three things came out of this that I would not have found by counting commands.
 
 **The parent chain is the signal, not the command.** `WmiPrvSE.exe` spawning `cmd.exe` is not something that happens during normal interactive work. The `whoami` at the bottom of that tree is the same binary an admin runs, but the two hops above it are not.
@@ -199,31 +201,63 @@ Three things came out of this that I would not have found by counting commands.
 
 Worth being straight about the limit here. Even with the session key grouping, this particular sample only produced one discovery binary, so a density rule with a threshold of three would still not fire on it. Density and ancestry cover different things: density catches an operator sweeping a host with a handful of utilities, ancestry catches a single command arriving through a channel it has no business arriving through. Neither one subsumes the other, which is why I ended up writing both.
 
-### Sigma
+### The ancestry detection
 
-Converting the ancestry pattern to portable Sigma. This is written from what I observed rather than tested through a Sigma backend, which is what `status: experimental` is there to say.
+The search above was a broad pivot, using ORs so it would catch anything touching `ADMIN$` or `WmiPrvSE`. Tightened into rule form, the four conditions have to hold together:
 
-```yaml
-title: Remote Command Execution via WMI with SMB Output Redirection
-status: experimental
-description: Detects the WMI process call create pattern used by Impacket wmiexec, where cmd.exe is spawned by WmiPrvSE and redirects output to an admin share
-logsource:
-  product: windows
-  category: process_creation
-detection:
-  selection_parent:
-    ParentImage|endswith: '\WmiPrvSE.exe'
-    Image|endswith: '\cmd.exe'
-  selection_redirect:
-    CommandLine|contains|all:
-      - '/Q /c'
-      - 'ADMIN$'
-      - '2>&1'
-  condition: selection_parent and selection_redirect
-falsepositives:
-  - Legitimate remote administration tooling built on WMI process creation
-level: high
+```spl
+index=sysmon EventCode=1
+    ParentImage="*\\WmiPrvSE.exe" Image="*\\cmd.exe"
+    CommandLine="*/Q /c*" CommandLine="*ADMIN$*"
+| rex field=CommandLine "ADMIN\$\x5c(?<session_key>__\d+\.\d+)"
+| stats min(_time) as first_seen, max(_time) as last_seen,
+        values(CommandLine) as commands,
+        count as process_events
+    by host User session_key
+| convert ctime(first_seen) ctime(last_seen)
 ```
+
+**Logic walkthrough:**
+
+- `ParentImage` and `Image` together are the ancestry check. `WmiPrvSE.exe` spawning `cmd.exe` is the part that does not happen during ordinary interactive work.
+- The two `CommandLine` terms are ANDed, not ORed. `/Q /c` is a quiet non-interactive shell, and `ADMIN$` is output going to an admin share. Either one alone is weak. Both together, under that parent, is a remote execution wrapper. I originally had a third term here for the stderr redirection, and the next section is about why it had to come out.
+- Grouping by `session_key` collapses a whole remote session into one row rather than one row per command, which is the difference between an analyst seeing a session and an analyst seeing four disconnected alerts.
+- `first_seen` and `last_seen` give the session duration straight away, which is the first thing I would want to know during triage.
+
+Unlike the density rule, this one does not care how many commands ran. A single `whoami` arriving this way is worth looking at, because the delivery mechanism is the signal rather than the volume.
+
+### It returned nothing, for a reason I did not expect
+
+My first version of that rule had a fifth condition on it: `CommandLine="*2>&1*"`, matching the stderr redirection. It returned zero results across seven days, on data I had already screenshotted.
+
+I broke the rule apart and tested each condition separately:
+
+```spl
+index=sysmon EventCode=1 ParentImage="*WmiPrvSE.exe"
+| eval c1_image     = if(match(Image,"(?i)cmd\.exe$"),"Y","N")
+| eval c2_qc        = if(match(CommandLine,"/Q /c"),"Y","N")
+| eval c3_admin     = if(match(CommandLine,"ADMIN\$"),"Y","N")
+| eval c4_raw_redir = if(match(CommandLine,"2>&1"),"Y","N")
+| eval c5_esc_redir = if(match(CommandLine,"2&gt;&amp;1"),"Y","N")
+| table _time Image CommandLine c1_image c2_qc c3_admin c4_raw_redir c5_esc_redir
+| sort - _time
+```
+
+![Clause by clause diagnostic showing the redirection match failing](images/11-ancestry-rule-clause-diagnostic.png)
+
+Y, Y, Y, N, Y on every row. The indexed field does not contain `2>&1`. It contains `2&gt;&amp;1`. The XML escaping from the Windows event log survived all the way through to the searchable value, so the string I was matching on never existed. One failing condition in a chain of ANDs took the whole rule to zero, and because the other four matched fine there was nothing on screen to hint at which one was broken.
+
+I dropped the clause rather than matching the escaped form. Escape-matching would weld the rule to this particular ingestion path, and a different forwarder or add-on could serialize it differently. The remaining four conditions still captured the session without tying the rule to one encoded representation of a redirection.
+
+How specific those four are on their own is a question I cannot answer from this lab. The rule returned exactly one row across seven days, but there is no legitimate WMI remote administration running here for it to trip over. Somewhere with management tooling built on WMI process creation, that number would be the thing to check first.
+
+That is three detections in this writeup with three different hidden assumptions in them. Shell formatting the first time, fixed time boundaries the second, indexed encoding the third. None of the three was visible from reading the SPL, and every one of them looked reasonable until it met real telemetry. Two of the three came down to a literal string not being what I thought it was, which is a pattern I now treat as a warning rather than a coincidence.
+
+### The working version
+
+![Ancestry rule returning one row per remote session](images/12-ancestry-rule-session.png)
+
+One row. WIN11V, one session key, three commands, 19:13:44 to 19:13:46. That is what I would want to land in a queue: not three separate alerts, but one session with its duration and everything that ran inside it.
 
 ## Validating the density rule
 
@@ -238,15 +272,15 @@ ipconfig /all
 tasklist
 ```
 
-![Start of the discovery burst on WIN11V](images/11-discovery-burst-start.png)
+![Start of the discovery burst on WIN11V](images/13-discovery-burst-start.png)
 
 `cmdkey /list` came back with an actual stored credential rather than an empty list, which is a small reminder that credential enumeration is not always a dry hole.
 
-![cmdkey listing a stored credential](images/12-discovery-burst-cmdkey.png)
+![cmdkey listing a stored credential](images/14-discovery-burst-cmdkey.png)
 
 The rule fired.
 
-![Density rule returning a true positive](images/13-density-rule-true-positive.png)
+![Density rule returning a true positive](images/15-density-rule-true-positive.png)
 
 One row, one host, one `group_key` of `{f06822d4-191f-6a74-0f01-000000002100}`, which is the GUID of the single cmd.exe I typed everything into. The `ParentProcessGuid` grouping did exactly what it was supposed to do.
 
@@ -262,7 +296,7 @@ index=sysmon EventCode=1
 | sort - _time
 ```
 
-![Diagnostic showing all six commands under one GUID split across the bucket boundary](images/14-density-rule-bucket-split.png)
+![Diagnostic showing all six commands under one GUID split across the bucket boundary](images/16-density-rule-bucket-split.png)
 
 ```
 22:18:34  whoami /all      ┐
@@ -301,11 +335,11 @@ index=sysmon EventCode=1
 | sort - _time
 ```
 
-![Rolling window recovering all six binaries in one group](images/15-density-rule-rolling-window.png)
+![Rolling window recovering all six binaries in one group](images/17-density-rule-rolling-window.png)
 
 All six binaries, one group, six events. Same data, same threshold, same grouping key. The only thing that changed was `bin` to `streamstats`.
 
-Two notes on the syntax. `sort 0 _time` is required because `time_window` only works on input already in time order, and the `0` removes the default result cap. And because `streamstats` is a streaming aggregate, it emits a row at every qualifying event rather than one row per session: you can read the count climbing 3, 4, 5, then 6 as each command lands, which is what an alert would see in flight. The first row appears at `systeminfo`, the third distinct binary, because that is where the sweep first crosses the threshold. For a real saved search I would collapse that with a `dedup` or a max per group so one sweep produces one notable instead of four.
+Two notes on the syntax. `sort 0 _time` is required because `time_window` only works on input already in time order, and the `0` removes the default result cap. And because `streamstats` is a streaming aggregate, it emits a row at every qualifying event rather than one row per session: you can read the count climbing 3, 4, 5, then 6 as each command lands, which is what an alert would see in flight. The first row appears at `systeminfo`, the third distinct binary, because that is where the sweep first crosses the threshold.
 
 **Tradeoff:** `streamstats` with a time window costs more compute than `bin`, and it needs a sort in front of it. On a busy index that is not free. For a rule that only runs against a filtered set of a dozen binaries it is worth it, and if this were running against unfiltered process creation I would think harder about it.
 
@@ -315,7 +349,7 @@ I have a small amount of real benign activity in the same dataset, which is enou
 
 **Seven days of lab activity, zero observed false positives.** I ran the rolling window rule across the whole week rather than just the validation window, so every piece of benign activity in the lab got tested against it.
 
-![Rolling window rule across seven days returning only the burst](images/16-density-rule-seven-day-baseline.png)
+![Rolling window rule across seven days returning only the burst](images/18-density-rule-seven-day-baseline.png)
 
 Four rows, all four from the burst, all under the same process GUID. Nothing else crossed the threshold in seven days.
 
@@ -345,8 +379,8 @@ These come out of my own rule's logic rather than tradecraft I tested.
 
 I built a timechart broken down by host to see the daily shape of the activity, and turned on Splunk's conditional formatting to color the counts.
 
-![Recon command timechart broken down by host](images/17-recon-timechart-by-host.png)
-![Same timechart with conditional color formatting applied](images/18-recon-timechart-color-coded.png)
+![Recon command timechart broken down by host](images/19-recon-timechart-by-host.png)
+![Same timechart with conditional color formatting applied](images/20-recon-timechart-color-coded.png)
 
 This is worth flagging as a trap. WIN11A shows a count of 1 in bright red while WIN11V shows a count of 2 in pale pink. Splunk scales the color per column, so the numbers are being compared against their own host's range and not against each other. On a quiet host a single event renders as the hottest thing on screen. It is a genuinely useful view for spotting a host that broke its own baseline, and a genuinely misleading one if you read the colors as absolute severity.
 
@@ -357,11 +391,9 @@ This is worth flagging as a trap. WIN11A shows a count of 1 in bright red while 
 - **A rule returning results is not a rule that works.** Mine returned results for a week while missing half of what I ran. The only reason I caught it was checking the output against what I knew I had executed. I validate against known ground truth now rather than treating a non empty result set as confirmation.
 - **Single tokens hid the failure.** `whoami` matched because nothing could break it. If my test commands had all been two word commands I would have gotten zero results and found the bug in a minute. The partial success is what made it survive.
 - **Remote execution and interactive execution look identical until you look at the grandparent.** `ParentImage` was not enough. `ParentCommandLine` and the process tree above it were.
+- **Every detection carries implementation assumptions, and reading the query will not find them.** These three rules assumed things about shell formatting, about time boundaries, and about how a field gets encoded on its way into the index. All three assumptions were invisible in the SPL and all three were wrong.
+- **Literal string matching is the most fragile part.** Two of the three failures were the indexed value not being the value I expected, once from shell spacing and once from XML escaping, and both produced a complete miss rather than a degraded one. I check the raw field before matching on it now.
 - **Test the rule against activity you generated on purpose.** My six command burst was supposed to be a formality to confirm the threshold. It exposed a fixed bucket boundary that silently discarded a third of a real detection, and I would not have found that by reading the query.
-
-## What I am doing next
-
-Turning the rolling window version into a saved search, collapsing the repeated rows within a run, and setting alert suppression so a single sweep does not generate a fresh notable every time overlapping scheduled searches pass over it. After that, rebuilding the same logic on 4688 so I am not dependent on a single sensor. I also want to test whether `OriginalFileName` holds up against a renamed binary, since that is the cheapest evasion against what I have now.
 
 ---
 
