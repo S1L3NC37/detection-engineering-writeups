@@ -2,7 +2,7 @@
 
 This repository documents my hands-on detection engineering work in a lab I built and operate on my own hardware.
 
-I execute attack techniques, examine the telemetry they produce, develop and test Splunk detection logic, troubleshoot missing or incomplete logging, and correlate activity across endpoint, Windows Security, and network data sources.
+I execute attack techniques, examine the telemetry they produce, develop and test Splunk detection logic, build investigation workflows, troubleshoot missing or incomplete logging, and correlate activity across endpoint, Windows Security, and network data sources.
 
 The SPL queries are only one part of the work. The primary focus of this portfolio is the reasoning required to move from attacker behavior to an observable and testable detection hypothesis.
 
@@ -20,6 +20,7 @@ The SPL queries are only one part of the work. The primary focus of this portfol
 * Developing and iteratively refining SPL detections
 * Validating detection output against known ground truth and testing assumptions about field formatting, time windows, and ingestion encoding
 * Baselining normal behavior and investigating false positives
+* Profiling legitimate dual-use Windows binaries and enriching investigations with LOLBAS reference data
 * Testing multiple attack procedures against the same telemetry
 * Testing whether detections survive basic evasion such as executable and service renaming
 * Correlating Windows host telemetry with network evidence
@@ -54,6 +55,12 @@ For WMIExec, I developed a Sysmon process-creation detection combining `WmiPrvSE
 I ran Windows discovery and credential-enumeration commands from cmd.exe and PowerShell, then compared a command-line regex against known Sysmon ground truth. The query returned results while missing 12 of 23 selected process-creation events because the two shells recorded `net user` in forms the literal pattern did not match.
 
 I rebuilt the detection around resolved process images and distinct utility density within one execution context. A six-command validation burst exposed a second failure when fixed ten-minute buckets split the sweep and discarded two commands, so I replaced them with a rolling `streamstats` window and tested the result across seven days of lab activity. I also developed a separate WMI remote-execution ancestry rule, traced its initial zero-result failure to XML-escaped redirection text, and grouped the commands into one analyst-readable session using WMIExec's shared output filename.
+
+### [Profiling Rundll32 and LOLBin Abuse in Splunk](profiling-rundll32-and-lolbin-abuse.md)
+
+I generated a Meterpreter DLL, executed it through `rundll32.exe` on WIN11V, and profiled the resulting Sysmon process and network telemetry. Because Rundll32 also appears in legitimate Windows activity, I compared command lines and parsed DLL entry points to see where my test execution stood out from the surrounding baseline.
+
+My first network correlation grouped events by executable name and made separate Rundll32 processes look like one sequence. I reran the investigation with `ProcessGuid` and `ParentProcessGuid` and established the actual chain: the `evil.dll,DllMain` execution spawned a child `rundll32.exe`, and that child made the reverse connection to LinuxA. I then imported the LOLBAS dataset into Splunk and loaded a dashboard template that puts local Sysmon activity next to reference context for the selected LOLBin.
 
 ### [Catching LSASS Credential Dumping Three Ways](catching-lsass-credential-dumping.md)
 
@@ -98,7 +105,7 @@ The writeup covers why each signal works in my environment, the false positives 
 | [Reverse shell: anomalous process relationship](catching-my-first-reverse-shell.md) | Windows | Sysmon EID 1 | [T1059.003: Windows Command Shell](https://attack.mitre.org/techniques/T1059/003/) | Lab validated |
 | [Reverse shell: abnormal command-line length](catching-my-first-reverse-shell.md) | Windows | Sysmon EID 1 | [T1059.001: PowerShell](https://attack.mitre.org/techniques/T1059/001/) | Lab validated |
 
-Additional detections will be added to the catalog as their investigation and validation writeups are completed.
+Writeups focused on profiling or investigation that do not contain a lab-validated detection are listed above but are not added to this catalog. Additional detections will be added as their investigation and validation writeups are completed.
 
 ---
 
