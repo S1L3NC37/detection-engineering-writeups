@@ -44,7 +44,7 @@ My initial Event 4662 detection returned no results even though the attack succe
 
 The Event 4662 result identified the account performing the directory operation but did not provide usable source-host information through my Event 4624 enrichment. I recovered the client IP through Event 4769 and independently confirmed the `DRSGetNCChanges` request from the workstation to the domain controller using Malcolm, Zeek, and Arkime.
 
-### [Active Directory Certificate Services (ESC1)](Active%20Directory%20Certificate%20Services.md)
+### [Investigating AD CS Certificate Abuse and Kerberos Authentication](Investigating%20AD%20CS%20Certificate%20Abuse%20and%20Kerberos%20Authentication)
 
 I configured and published an ESC1-vulnerable certificate template, enabled Certificate Services and Kerberos auditing, and generated certificate enrollment and PKINIT authentication activity.
 
