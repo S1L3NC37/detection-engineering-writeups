@@ -2,7 +2,7 @@
 
 This repository documents my hands-on detection engineering work in a lab I built and operate on my own hardware.
 
-I execute attack techniques, examine the telemetry they produce, develop and test Splunk detection logic, build investigation workflows, troubleshoot missing or incomplete logging, and correlate activity across endpoint, Windows Security, and network data sources.
+I execute attack techniques, examine the telemetry they produce, develop and test Splunk detection logic, build investigation workflows, troubleshoot missing or incomplete logging, and correlate activity across endpoint, Windows Security, Active Directory Certificate Services, and network data sources.
 
 The SPL queries are only one part of the work. The primary focus of this portfolio is the reasoning required to move from attacker behavior to an observable and testable detection hypothesis.
 
@@ -14,19 +14,20 @@ The SPL queries are only one part of the work. The primary focus of this portfol
 
 ## What This Portfolio Demonstrates
 
-* Investigating failed detections by tracing missing results to audit-policy, telemetry, and ingestion dependencies
-* Building and operating a multi-source detection lab
-* Translating attacker behavior into observable telemetry
-* Developing and iteratively refining SPL detections
-* Validating detection output against known ground truth and testing assumptions about field formatting, time windows, and ingestion encoding
-* Baselining normal behavior and investigating false positives
-* Profiling legitimate dual-use Windows binaries and enriching investigations with LOLBAS reference data
-* Testing multiple attack procedures against the same telemetry
-* Testing whether detections survive basic evasion such as executable and service renaming
-* Correlating Windows host telemetry with network evidence
-* Distinguishing core detection logic from enrichment and attribution
-* Documenting limitations, blind spots, and investigation considerations
-* Mapping detection coverage to MITRE ATT&CK
+- Investigating failed detections by tracing missing results to audit-policy, telemetry, and ingestion dependencies
+- Building and operating a multi-source detection lab
+- Translating attacker behavior into observable telemetry
+- Developing and iteratively refining SPL detections
+- Validating detection output against known ground truth and testing assumptions about field formatting, time windows, and ingestion encoding
+- Baselining normal behavior and investigating false positives
+- Profiling legitimate dual-use Windows binaries and enriching investigations with LOLBAS reference data
+- Testing multiple attack procedures against the same telemetry
+- Testing whether detections survive basic evasion such as executable and service renaming
+- Correlating Windows host telemetry with network evidence
+- Correlating AD CS certificate issuance with certificate-backed Kerberos authentication
+- Distinguishing core detection logic from enrichment and attribution
+- Documenting limitations, blind spots, and investigation considerations
+- Mapping detection coverage to MITRE ATT&CK
 
 ---
 
@@ -54,13 +55,23 @@ For WMIExec, I developed a Sysmon process-creation detection combining `WmiPrvSE
 
 I ran Windows discovery and credential-enumeration commands from cmd.exe and PowerShell, then compared a command-line regex against known Sysmon ground truth. The query returned results while missing 12 of 23 selected process-creation events because the two shells recorded `net user` in forms the literal pattern did not match.
 
-I rebuilt the detection around resolved process images and distinct utility density within one execution context. A six-command validation burst exposed a second failure when fixed ten-minute buckets split the sweep and discarded two commands, so I replaced them with a rolling `streamstats` window and tested the result across seven days of lab activity. I also developed a separate WMI remote-execution ancestry rule, traced its initial zero-result failure to XML-escaped redirection text, and grouped the commands into one analyst-readable session using WMIExec's shared output filename.
+I rebuilt the detection around resolved process images and distinct utility density within one execution context. A six-command validation burst exposed a second failure when fixed ten-minute buckets split the sweep and discarded two commands, so I replaced them with a rolling `streamstats` window and tested the result across seven days of lab activity.
+
+I also developed a separate WMI remote-execution ancestry rule, traced its initial zero-result failure to XML-escaped redirection text, and grouped the commands into one analyst-readable session using WMIExec's shared output filename.
 
 ### [Profiling Rundll32 and LOLBin Abuse in Splunk](profiling-rundll32-and-lolbin-abuse.md)
 
-I generated a Meterpreter DLL, executed it through `rundll32.exe` on WIN11V, and profiled the resulting Sysmon process and network telemetry. Because Rundll32 also appears in legitimate Windows activity, I compared command lines and parsed DLL entry points to see where my test execution stood out from the surrounding baseline.
+I generated a Meterpreter DLL with Metasploit, executed it through `rundll32.exe` on WIN11V, and profiled the resulting Sysmon process and network telemetry. Because Rundll32 also appears in legitimate Windows activity, I compared command lines and parsed DLL entry points to see where my test execution stood out from the surrounding baseline.
 
 My first network correlation grouped events by executable name and made separate Rundll32 processes look like one sequence. I reran the investigation with `ProcessGuid` and `ParentProcessGuid` and established the actual chain: the `evil.dll,DllMain` execution spawned a child `rundll32.exe`, and that child made the reverse connection to LinuxA. I then imported the LOLBAS dataset into Splunk and loaded a dashboard template that puts local Sysmon activity next to reference context for the selected LOLBin.
+
+### [Active Directory Certificate Services (ESC1)](Active%20Directory%20Certificate%20Services.md)
+
+I configured and published an ESC1-vulnerable certificate template in Active Directory Certificate Services, generated certificate enrollment and certificate-based Kerberos authentication activity with Metasploit, and investigated the resulting Windows Security telemetry in Splunk.
+
+The lab exposed two separate auditing gaps: Certificate Services events required both the CA audit filter and Windows Certification Services auditing, while Kerberos Event 4768 required its own audit subcategory on the domain controller. I used Events 4898, 4887, and 4768 to examine template configuration, certificate issuance, and PKINIT-based TGT activity, then correlated the issued certificate to the Kerberos event through its serial number.
+
+The investigation also uncovered an important distinction in the lab procedure: the Metasploit request did not explicitly select the vulnerable template, and Event 4887 showed that the certificate used for the TGT came from the built-in `User` template. I documented that limitation rather than treating the run as a completed ESC1 privilege escalation.
 
 ### [Catching LSASS Credential Dumping Three Ways](catching-lsass-credential-dumping.md)
 
@@ -105,22 +116,20 @@ The writeup covers why each signal works in my environment, the false positives 
 | [Reverse shell: anomalous process relationship](catching-my-first-reverse-shell.md) | Windows | Sysmon EID 1 | [T1059.003: Windows Command Shell](https://attack.mitre.org/techniques/T1059/003/) | Lab validated |
 | [Reverse shell: abnormal command-line length](catching-my-first-reverse-shell.md) | Windows | Sysmon EID 1 | [T1059.001: PowerShell](https://attack.mitre.org/techniques/T1059/001/) | Lab validated |
 
-Writeups focused on profiling or investigation that do not contain a lab-validated detection are listed above but are not added to this catalog. Additional detections will be added as their investigation and validation writeups are completed.
+Writeups focused on profiling, telemetry investigation, or configuration analysis that do not contain a lab-validated detection are listed above but are not added to this catalog. Additional detections will be added as their investigation and validation writeups are completed.
 
 ---
 
 ## Lab Architecture
 
-![Detection lab topology showing the Windows domain, attacker system, Splunk, Malcolm, Kubernetes, Entra ID, and AWS telemetry paths](images/lab-topology.png)
-
-**Domain:** `condef.local`  
-**Network:** VMware NAT `192.168.137.0/24`  
-**Gateway:** `192.168.137.2`
+Domain: `condef.local`  
+Network: VMware NAT `192.168.137.0/24`  
+Gateway: `192.168.137.2`
 
 | Host | Address | Role |
 | --- | --- | --- |
 | DC | `192.168.137.135` | Windows Server 2019 domain controller, DNS server, and Splunk Enterprise 9.3.2 |
-| CERTER | `192.168.137.136` | Domain member server and Sysmon configuration-push host |
+| CERTER | `192.168.137.136` | Domain member server, Active Directory Certificate Services enterprise CA, and Sysmon configuration-push host |
 | Win11V | `192.168.137.137` | Domain-joined Windows workstation, Sysmon endpoint, and primary attack target |
 | Win11A | `192.168.137.138` | Domain-joined Windows workstation with Sysmon and Windows-side attack tooling |
 | LinuxA | `192.168.137.139` | Attacker system running Metasploit and Impacket |
@@ -149,15 +158,15 @@ Host and cloud telemetry is collected in Splunk using purpose-built indexes. Net
 
 The Windows System log is not currently forwarded to Splunk. Where a writeup uses System events, such as Event ID 7045 for service installation, I inspect them locally in Event Viewer.
 
-The currently published detection writeups focus on Windows and Active Directory telemetry. The wider lab also collects Linux, Kubernetes, Entra ID, and AWS data, but writeups for those platforms are not yet published.
+The currently published writeups focus on Windows and Active Directory telemetry. The wider lab also collects Linux, Kubernetes, Entra ID, and AWS data, but writeups for those platforms are not yet published.
 
 ### Ingestion Routes
 
-* Splunk Universal Forwarder traffic is pushed to Splunk on TCP port `9997`.
-* HTTP Event Collector traffic is pushed on TCP port `8088`.
-* AWS CloudTrail data is pulled from Amazon S3.
-* Entra ID events are consumed from Azure Event Hubs.
-* Malcolm observes the virtual network in promiscuous mode.
+- Splunk Universal Forwarder traffic is pushed to Splunk on TCP port `9997`.
+- HTTP Event Collector traffic is pushed on TCP port `8088`.
+- AWS CloudTrail data is pulled from Amazon S3.
+- Entra ID events are consumed from Azure Event Hubs.
+- Malcolm observes the virtual network in promiscuous mode.
 
 These routes include both push-based and pull-based collection methods, each with different configuration requirements and failure modes.
 
@@ -165,37 +174,38 @@ These routes include both push-based and pull-based collection methods, each wit
 
 ## Tooling
 
-* Splunk Enterprise 9.3.2
-* Splunk Universal Forwarder
-* Splunk Add-on for AWS
-* Splunk Add-on for Microsoft Cloud Services
-* Splunk OpenTelemetry Collector
-* Malcolm
-* Arkime through Malcolm
-* Sysmon with [sysmon-modular](https://github.com/olafhartong/sysmon-modular)
-* Laurel and auditd with the [Neo23x0 auditd ruleset](https://github.com/Neo23x0/auditd)
-* VMware Workstation
-* Windows Server 2019
-* Windows 11
-* Active Directory Domain Services
-* Metasploit Framework
-* Mimikatz
-* Impacket
-* Microsoft Sysinternals PsExec
-* Minikube
-* Kubernetes
-* kubectl
-* Helm
-* Azure Event Hubs
-* Microsoft Entra ID diagnostic settings
-* AWS CloudTrail
-* Amazon S3
+- Splunk Enterprise 9.3.2
+- Splunk Universal Forwarder
+- Splunk Add-on for AWS
+- Splunk Add-on for Microsoft Cloud Services
+- Splunk OpenTelemetry Collector
+- Malcolm
+- Arkime through Malcolm
+- Sysmon with [sysmon-modular](https://github.com/olafhartong/sysmon-modular)
+- Laurel and auditd with the [Neo23x0 auditd ruleset](https://github.com/Neo23x0/auditd)
+- VMware Workstation
+- Windows Server 2019
+- Windows 11
+- Active Directory Domain Services
+- Active Directory Certificate Services
+- Metasploit Framework
+- Mimikatz
+- Impacket
+- Microsoft Sysinternals PsExec
+- Minikube
+- Kubernetes
+- kubectl
+- Helm
+- Azure Event Hubs
+- Microsoft Entra ID diagnostic settings
+- AWS CloudTrail
+- Amazon S3
 
 ---
 
 ## Background and Attribution
 
-I built this lab while working through [Constructing Defense](https://www.justhacking.com/course/condef-lite/) by Anton Ovrutsky of justhacking.com.
+I built this lab while working through [Constructing Defense](https://www.justhacking.com/) by Anton Ovrutsky of justhacking.com.
 
 I am completing the Lite track, which does not provide a hosted cyber range. I built the environment on my own hardware by following the course's architectural and telemetry guidance.
 
